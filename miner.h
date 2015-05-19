@@ -608,13 +608,19 @@ struct work {
 	uint32_t scanned_to;
 };
 
-#define MAX_POOLS 4
+#define MAX_POOLS 8
 struct pool_infos {
 #define POOL_UNUSED   0
 #define POOL_GETWORK  1
 #define POOL_STRATUM  2
 #define POOL_LONGPOLL 4
 	uint8_t type;
+#define POOL_ST_DEFINED 1
+#define POOL_ST_VALID 2
+#define POOL_ST_DISABLED 4
+#define POOL_ST_REMOVED 8
+	uint16_t status;
+	char name[64];
 	// credentials
 	char url[256];
 	char short_url[64];
@@ -629,6 +635,7 @@ struct pool_infos {
 };
 
 void pool_set_creds(int pooln);
+void pool_set_attr(int pooln, const char* key, char* arg);
 bool pool_switch_url(char *params);
 bool pool_switch(int pooln);
 bool pool_switch_next(void);

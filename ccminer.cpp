@@ -272,7 +272,7 @@ Usage: " PROGRAM_NAME " [OPTIONS]\n\
 Options:\n\
   -a, --algo=ALGO       specify the hash algorithm to use\n\
 			anime       Animecoin\n\
-			blake       Blake 256 (SFR/NEOS)\n\
+			blake       Blake 256 (SFR)\n\
 			blakecoin   Fast Blake 256 (8 rounds)\n\
 			deep        Deepcoin\n\
 			dmd-gr      Diamond-Groestl\n\
@@ -301,7 +301,7 @@ Options:\n\
 			x13         X13 (MaruCoin)\n\
 			x14         X14\n\
 			x15         X15\n\
-			x17         X17 (peoplecurrency)\n\
+			x17         X17\n\
 			zr5         ZR5 (ZiftrCoin)\n\
   -d, --devices         Comma separated list of CUDA devices to use.\n\
                         Device IDs start counting from 0! Alternatively takes\n\
@@ -327,7 +327,7 @@ Options:\n\
   -s, --scantime=N      upper bound on time spent scanning current work when\n\
                           long polling is unavailable, in seconds (default: 10)\n\
   -n, --ndevs           list cuda devices\n\
-  -N, --statsavg        number of samples used to display hashrate (default: 30)\n\
+  -N, --statsavg        number of samples used to compute hashrate (default: 30)\n\
       --no-gbt          disable getblocktemplate support (height check in solo)\n\
       --no-longpoll     disable X-Long-Polling support\n\
       --no-stratum      disable X-Stratum support\n\
@@ -337,8 +337,8 @@ Options:\n\
   -P, --protocol-dump   verbose dump of protocol-level activities\n\
       --cpu-affinity    set process affinity to cpu core(s), mask 0x3 for cores 0 and 1\n\
       --cpu-priority    set process priority (default: 3) 0 idle, 2 normal to 5 highest\n\
-  -b, --api-bind        IP/Port for the miner API (default: 127.0.0.1:4068)\n\
-      --api-remote      Allow remote control\n\
+  -b, --api-bind=port   IP:port for the miner API (default: 127.0.0.1:4068), 0 disabled\n\
+      --api-remote      Allow remote control, like pool switching\n\
       --max-temp=N      Only mine if gpu temp is less than specified value\n\
       --max-rate=N[KMG] Only mine if net hashrate is less than specified value\n\
       --max-diff=N      Only mine if net difficulty is less than specified value\n"
@@ -389,6 +389,8 @@ static struct option const options[] = {
 	{ "max-diff", 1, NULL, 1061 },
 	{ "max-rate", 1, NULL, 1062 },
 	{ "pass", 1, NULL, 'p' },
+	{ "pool-name", 1, NULL, 1100 },    // pool
+	{ "pool-removed", 1, NULL, 1101 }, // pool
 	{ "protocol-dump", 0, NULL, 'P' },
 	{ "proxy", 1, NULL, 'x' },
 	{ "quiet", 0, NULL, 'q' },
@@ -431,13 +433,17 @@ Scrypt specific options:\n\
 #define CFG_POOL 1
 struct opt_config_array {
 	int cat;
-	const char *name;
+	const char *name;     // json key
+	const char *longname; // global opt name if different
 } cfg_array_keys[] = {
-	{ CFG_POOL, "url" },
-	{ CFG_POOL, "user" },
-	{ CFG_POOL, "pass" },
-	{ CFG_POOL, "userpass" },
-	{ CFG_NULL, NULL }
+	{ CFG_POOL, "url", NULL }, /* let this key first, increment pools */
+	{ CFG_POOL, "user", NULL },
+	{ CFG_POOL, "pass", NULL },
+	{ CFG_POOL, "userpass", NULL },
+	{ CFG_POOL, "name", "pool-name" },
+	{ CFG_POOL, "removed",  "pool-removed" },
+	{ CFG_POOL, "disabled", "pool-removed" }, // sample alias
+	{ CFG_NULL, NULL, NULL }
 };
 
 struct work _ALIGN(64) g_work;
@@ -2234,6 +2240,25 @@ void pool_set_creds(int pooln)
 			p->type = POOL_STRATUM;
 		else /* if (!strncasecmp(rpc_url, "http", 4)) */
 			p->type = POOL_GETWORK; // todo: or longpoll
+		p->status |= POOL_ST_VALID;
+	}
+	p->status |= POOL_ST_DEFINED;
+}
+
+void pool_set_attr(int pooln, const char* key, char* arg)
+{
+	struct pool_infos *p = &pools[pooln];
+
+	if (!strcasecmp(key, "name")) {
+		snprintf(p->name, sizeof(p->name), "%s", arg);
+		return;
+	}
+	if (!strcasecmp(key, "removed")) {
+		int removed = atoi(arg);
+		if (removed) {
+			p->status |= POOL_ST_REMOVED;
+		}
+		return;
 	}
 }
 
@@ -2309,10 +2334,29 @@ bool pool_switch(int pooln)
 	return true;
 }
 
+static int pool_get_first_valid(int startfrom)
+{
+	int next = 0;
+	struct pool_infos *p;
+	for (int i=0; i<num_pools; i++) {
+		int pooln = (startfrom + i) % num_pools;
+		p = &pools[pooln];
+		if (!(p->status & POOL_ST_VALID))
+			continue;
+		if (p->status & (POOL_ST_DISABLED | POOL_ST_REMOVED))
+			continue;
+		next = pooln;
+		break;
+	}
+	if (opt_debug)
+		applog(LOG_DEBUG, "first valid pool is %d", next);
+	return next;
+}
+
 bool pool_switch_next()
 {
 	if (num_pools > 1) {
-		int pooln = (cur_pooln + 1) % num_pools;
+		int pooln = pool_get_first_valid(cur_pooln+1);
 		return pool_switch(pooln);
 	} else {
 		// no switch possible
@@ -2499,6 +2543,12 @@ void parse_arg(int key, char *arg)
 		free(rpc_pass);
 		rpc_pass = strdup(arg);
 		pool_set_creds(cur_pooln);
+		break;
+	case 1100: /* pool name */
+		pool_set_attr(cur_pooln, "name", arg);
+		break;
+	case 1101: /* pool removed */
+		pool_set_attr(cur_pooln, "removed", arg);
 		break;
 	case 'P':
 		opt_protocol = true;
@@ -2812,8 +2862,14 @@ static bool parse_pool_array(json_t *obj)
 			if (!val)
 				continue;
 
-			for (int k = 0; k < ARRAY_SIZE(options); k++) {
-				if (!strcasecmp(options[k].name, cfg_array_keys[i].name)) {
+			for (int k = 0; k < ARRAY_SIZE(options); k++)
+			{
+				const char *alias = cfg_array_keys[i].longname;
+				if (alias && !strcasecmp(options[k].name, alias)) {
+					opt = k;
+					break;
+				}
+				if (!alias && !strcasecmp(options[k].name, cfg_array_keys[i].name)) {
 					opt = k;
 					break;
 				}
@@ -2821,15 +2877,27 @@ static bool parse_pool_array(json_t *obj)
 			if (opt == -1)
 				continue;
 
-			if (!json_is_string(val))
-				continue;
-			s = strdup(json_string_value(val));
-			if (!s)
-				continue;
+			if (json_is_string(val)) {
+				s = strdup(json_string_value(val));
+				if (!s)
+					continue;
 
-			//applog(LOG_DEBUG, "pool key %s '%s'", options[opt].name, s);
-			parse_arg(options[opt].val, s);
-			free(s);
+				// applog(LOG_DEBUG, "pool key %s '%s'", options[opt].name, s);
+				parse_arg(options[opt].val, s);
+				free(s);
+			} else {
+				// numeric or bool
+				char buf[32] = { 0 };
+				double d = 0.;
+				if (json_is_true(val)) d = 1.;
+				else if (json_is_integer(val))
+					d = 1.0 * json_integer_value(val);
+				else if (json_is_real(val))
+					d = json_real_value(val);
+				snprintf(buf, sizeof(buf)-1, "%f", d);
+				// applog(LOG_DEBUG, "pool key %s '%f'", options[opt].name, d);
+				parse_arg(options[opt].val, buf);
+			}
 		}
 	}
 	return true;
@@ -3054,11 +3122,10 @@ int main(int argc, char *argv[])
 	pthread_mutex_init(&stats_lock, NULL);
 	pthread_mutex_init(&g_work_lock, NULL);
 
-	/* reset to the first pool (changed during cmdline parsing) */
-	cur_pooln = 0;
-	pool_switch(0);
 	if (opt_debug)
 		pool_dump_infos();
+	cur_pooln = pool_get_first_valid(0);
+	pool_switch(cur_pooln);
 
 	flags = !opt_benchmark && strncmp(rpc_url, "https:", 6)
 	      ? (CURL_GLOBAL_ALL & ~CURL_GLOBAL_SSL)
