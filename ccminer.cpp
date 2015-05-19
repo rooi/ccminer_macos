@@ -30,6 +30,7 @@
 #include <windows.h>
 #include <stdint.h>
 #else
+#define SIGBREAK SIGINT
 #include <errno.h>
 #include <sys/resource.h>
 #if HAVE_SYS_SYSCTL_H
@@ -301,7 +302,6 @@ Options:\n\
 			x14         X14\n\
 			x15         X15\n\
 			x17         X17 (peoplecurrency)\n\
-			whirlpoolx  Vanilla coin\n\
 			zr5         ZR5 (ZiftrCoin)\n\
   -d, --devices         Comma separated list of CUDA devices to use.\n\
                         Device IDs start counting from 0! Alternatively takes\n\
@@ -426,6 +426,19 @@ Scrypt specific options:\n\
                         active frame rates (because it drives a display).\n\
       --no-autotune     disable auto-tuning of kernel launch parameters\n\
 ";
+
+#define CFG_NULL 0
+#define CFG_POOL 1
+struct opt_config_array {
+	int cat;
+	const char *name;
+} cfg_array_keys[] = {
+	{ CFG_POOL, "url" },
+	{ CFG_POOL, "user" },
+	{ CFG_POOL, "pass" },
+	{ CFG_POOL, "userpass" },
+	{ CFG_NULL, NULL }
+};
 
 struct work _ALIGN(64) g_work;
 time_t g_work_time;
@@ -2772,24 +2785,73 @@ void parse_arg(int key, char *arg)
 }
 
 /**
- * Parse json config file
+ * Parse json config
  */
-static void parse_config(void)
+static bool parse_pool_array(json_t *obj)
+{
+	size_t idx;
+	json_t *p, *val;
+
+	if (!json_is_array(obj))
+		return false;
+
+	// array of objects [ {}, {} ]
+	json_array_foreach(obj, idx, p)
+	{
+		if (!json_is_object(p))
+			continue;
+
+		for (int i = 0; i < ARRAY_SIZE(cfg_array_keys); i++)
+		{
+			int opt = -1;
+			char *s = NULL;
+			if (cfg_array_keys[i].cat != CFG_POOL)
+				continue;
+
+			val = json_object_get(p, cfg_array_keys[i].name);
+			if (!val)
+				continue;
+
+			for (int k = 0; k < ARRAY_SIZE(options); k++) {
+				if (!strcasecmp(options[k].name, cfg_array_keys[i].name)) {
+					opt = k;
+					break;
+				}
+			}
+			if (opt == -1)
+				continue;
+
+			if (!json_is_string(val))
+				continue;
+			s = strdup(json_string_value(val));
+			if (!s)
+				continue;
+
+			//applog(LOG_DEBUG, "pool key %s '%s'", options[opt].name, s);
+			parse_arg(options[opt].val, s);
+			free(s);
+		}
+	}
+	return true;
+}
+
+void parse_config(json_t* json_obj)
 {
 	int i;
 	json_t *val;
 
-	if (!json_is_object(opt_config))
+	if (!json_is_object(json_obj))
 		return;
 
 	for (i = 0; i < ARRAY_SIZE(options); i++) {
 
 		if (!options[i].name)
 			break;
-		if (!strcmp(options[i].name, "config"))
+
+		if (!strcasecmp(options[i].name, "config"))
 			continue;
 
-		val = json_object_get(opt_config, options[i].name);
+		val = json_object_get(json_obj, options[i].name);
 		if (!val)
 			continue;
 
@@ -2818,6 +2880,11 @@ static void parse_config(void)
 			applog(LOG_ERR, "JSON option %s invalid",
 				options[i].name);
 	}
+
+	val = json_object_get(json_obj, "pools");
+	if (val && json_typeof(val) == JSON_ARRAY) {
+		parse_pool_array(val);
+	}
 }
 
 static void parse_cmdline(int argc, char *argv[])
@@ -2841,7 +2908,7 @@ static void parse_cmdline(int argc, char *argv[])
 		show_usage_and_exit(1);
 	}
 
-	parse_config();
+	parse_config(opt_config);
 
 	if (opt_algo == ALGO_HEAVY && opt_vote == 9999) {
 		fprintf(stderr, "%s: Heavycoin hash requires block reward vote parameter (see --vote)\n",
