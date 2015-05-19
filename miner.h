@@ -602,10 +602,36 @@ struct work {
 
 	double difficulty;
 	uint32_t height;
+	uint8_t  pooln;
 
 	uint32_t scanned_from;
 	uint32_t scanned_to;
 };
+
+#define MAX_POOLS 4
+struct pool_infos {
+#define POOL_UNUSED   0
+#define POOL_GETWORK  1
+#define POOL_STRATUM  2
+#define POOL_LONGPOLL 4
+	uint8_t type;
+	// credentials
+	char url[256];
+	char short_url[64];
+	char userpass[128];
+	char user[64];
+	char pass[64];
+	// stats
+	uint32_t accepted_count;
+	uint32_t rejected_count;
+	// stratum connection
+	struct stratum_ctx stratum;
+};
+
+void pool_set_creds(int pooln);
+bool pool_switch_url(char *params);
+bool pool_switch(int pooln);
+bool pool_switch_next(void);
 
 bool stratum_socket_full(struct stratum_ctx *sctx, int timeout);
 bool stratum_send_line(struct stratum_ctx *sctx, char *s);

@@ -205,11 +205,19 @@ bool opt_autotune = true;
 bool abort_flag = false;
 char *jane_params = NULL;
 
+// pools (failover/getwork infos)
+pool_infos pools[MAX_POOLS] = { 0 };
+int num_pools = 1;
+volatile int cur_pooln = 0;
+
+// current connection
 char *rpc_user = NULL;
 static char *rpc_pass;
 static char *rpc_userpass = NULL;
 char *rpc_url;
 static char *short_url = NULL;
+struct stratum_ctx stratum = { 0 };
+
 char *opt_cert;
 char *opt_proxy;
 long opt_proxy_type;
@@ -222,7 +230,6 @@ int api_thr_id = -1;
 bool stratum_need_reset = false;
 struct work_restart *work_restart = NULL;
 static int app_exit_code = EXIT_CODE_OK;
-struct stratum_ctx stratum = { 0 };
 uint32_t zr5_pok = 0;
 
 pthread_mutex_t applog_lock;
@@ -723,6 +730,11 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 	bool stale_work = false;
 	char s[384];
 
+	/* discard work sent by other pools */
+	if (work->pooln != cur_pooln) {
+		return true;
+	}
+
 	/* discard if a newer bloc was received */
 	stale_work = work->height && work->height < g_work.height;
 	if (have_stratum && !stale_work && opt_algo != ALGO_ZR5 && opt_algo != ALGO_SCRYPT_JANE) {
@@ -986,6 +998,9 @@ static bool get_upstream_work(CURL *curl, struct work *work)
 	bool rc;
 	struct timeval tv_start, tv_end, diff;
 
+	/* assign pool number before rpc calls */
+	work->pooln = cur_pooln;
+
 	gettimeofday(&tv_start, NULL);
 	val = json_rpc_call(curl, rpc_url, rpc_userpass, rpc_req,
 			    want_longpoll, false, NULL);
@@ -1087,6 +1102,11 @@ static bool workio_submit_work(struct workio_cmd *wc, CURL *curl)
 
 	/* submit solution to bitcoin via JSON-RPC */
 	while (!submit_upstream_work(curl, wc->u.work)) {
+		uint32_t pooln = wc->u.work->pooln;
+		if (pooln != cur_pooln) {
+			applog(LOG_DEBUG, "discarding work from pool %u", pooln);
+			return true;
+		}
 		if (unlikely((opt_retries >= 0) && (++failures > opt_retries))) {
 			applog(LOG_ERR, "...terminating workio thread");
 			return false;
@@ -1226,6 +1246,8 @@ static void stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
 	}
 
 	pthread_mutex_lock(&sctx->work_lock);
+
+	work->pooln = cur_pooln;
 
 	// store the job ntime as high part of jobid
 	snprintf(work->job_id, sizeof(work->job_id), "%07x %s",
@@ -1477,7 +1499,7 @@ static void *miner_thread(void *userdata)
 			pthread_mutex_lock(&g_work_lock);
 			if ((time(NULL) - g_work_time) >= scan_time || nonceptr[0] >= (end_nonce - 0x100)) {
 				if (opt_debug && g_work_time && !opt_quiet)
-					applog(LOG_DEBUG, "work time %u/%us nonce %x/%x", time(NULL) - g_work_time,
+					applog(LOG_DEBUG, "work time %u/%us nonce %x/%x", (time(NULL) - g_work_time),
 						scan_time, nonceptr[0], end_nonce);
 				/* obtain new work from internal workio thread */
 				if (unlikely(!get_work(mythr, &g_work))) {
@@ -1560,7 +1582,7 @@ static void *miner_thread(void *userdata)
 				abort_flag = true;
 				if (opt_benchmark) {
 					char rate[32];
-					format_hashrate(global_hashrate, rate);
+					format_hashrate((double)global_hashrate, rate);
 	                                applog(LOG_NOTICE, "Benchmark: %s", rate);
 					usleep(200*1000);
 					fprintf(stderr, "%llu\n", (long long unsigned int) global_hashrate);
@@ -1920,8 +1942,9 @@ static void *longpoll_thread(void *userdata)
 {
 	struct thr_info *mythr = (struct thr_info *)userdata;
 	CURL *curl = NULL;
-	char *copy_start, *hdr_path = NULL, *lp_url = NULL;
+	char *hdr_path = NULL, *lp_url = NULL;
 	bool need_slash = false;
+	uint8_t pooln = cur_pooln;
 
 	curl = curl_easy_init();
 	if (unlikely(!curl)) {
@@ -1939,10 +1962,9 @@ start:
 		lp_url = hdr_path;
 		hdr_path = NULL;
 	}
-	
 	/* absolute path, on current server */
 	else {
-		copy_start = (*hdr_path == '/') ? (hdr_path + 1) : hdr_path;
+		char *copy_start = (*hdr_path == '/') ? (hdr_path + 1) : hdr_path;
 		if (rpc_url[strlen(rpc_url) - 1] != '/')
 			need_slash = true;
 
@@ -1953,15 +1975,22 @@ start:
 		sprintf(lp_url, "%s%s%s", rpc_url, need_slash ? "/" : "", copy_start);
 	}
 
+	if (have_stratum)
+		goto out;
+
 	applog(LOG_INFO, "Long-polling enabled on %s", lp_url);
 
 	while (1) {
-		json_t *val, *soval;
+		json_t *val = NULL, *soval;
 		int err;
+
+		// exit on pool switch
+		if (pooln != cur_pooln)
+			goto out;
 
 		val = json_rpc_call(curl, lp_url, rpc_userpass, rpc_req,
 				    false, true, &err);
-		if (have_stratum) {
+		if (have_stratum || pooln != cur_pooln) {
 			if (val)
 				json_decref(val);
 			goto out;
@@ -1971,6 +2000,7 @@ start:
 			submit_old = soval ? json_is_true(soval) : false;
 			pthread_mutex_lock(&g_work_lock);
 			if (work_decode(json_object_get(val, "result"), &g_work)) {
+				g_work.pooln = pooln;
 				restart_threads();
 				if (!opt_quiet) {
 					char netinfo[64] = { 0 };
@@ -2005,6 +2035,7 @@ out:
 	tq_freeze(mythr->q);
 	if (curl)
 		curl_easy_cleanup(curl);
+	have_longpoll = false;
 
 	return NULL;
 }
@@ -2061,16 +2092,18 @@ static void *stratum_thread(void *userdata)
 
 	while (1) {
 		int failures = 0;
+		bool pool_switched = false;
 
 		if (stratum_need_reset) {
 			stratum_need_reset = false;
-			stratum_disconnect(&stratum);
+			if (!stratum.url)
+				stratum.url = strdup(rpc_url);
+			else
+				stratum_disconnect(&stratum);
 			if (strcmp(stratum.url, rpc_url)) {
 				free(stratum.url);
 				stratum.url = strdup(rpc_url);
 				applog(LOG_BLUE, "Connection changed to %s", short_url);
-			} else if (!opt_quiet) {
-				applog(LOG_DEBUG, "Stratum connection reset");
 			}
 		}
 
@@ -2082,17 +2115,28 @@ static void *stratum_thread(void *userdata)
 
 			if (!stratum_connect(&stratum, stratum.url) ||
 			    !stratum_subscribe(&stratum) ||
-			    !stratum_authorize(&stratum, rpc_user, rpc_pass)) {
+			    !stratum_authorize(&stratum, rpc_user, rpc_pass))
+			{
 				stratum_disconnect(&stratum);
 				if (opt_retries >= 0 && ++failures > opt_retries) {
-					applog(LOG_ERR, "...terminating workio thread");
-					tq_push(thr_info[work_thr_id].q, NULL);
-					goto out;
+					if (!pool_switch_next()) {
+						applog(LOG_ERR, "...terminating workio thread");
+						tq_push(thr_info[work_thr_id].q, NULL);
+						//workio_abort();
+						goto out;
+					} else {
+						pool_switched = true;
+						break;
+					}
 				}
 				if (!opt_benchmark)
 					applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
 				sleep(opt_fail_pause);
 			}
+		}
+
+		if (pool_switched || !stratum.url) {
+			continue;
 		}
 
 		if (stratum.job.job_id &&
@@ -2137,6 +2181,154 @@ static void *stratum_thread(void *userdata)
 
 out:
 	return NULL;
+}
+
+/* stop and restart longpoll thread on pool switch */
+void restart_longpoll()
+{
+	struct thr_info *thr = &thr_info[longpoll_thr_id];
+
+	// thread should die by itself, but...
+	pthread_cancel(thr->pth);
+	pthread_kill(thr->pth, SIGBREAK);
+	usleep(500*1000);
+
+	g_work.data[0] = 0;
+
+	have_longpoll = false;
+	if (pthread_create(&thr->pth, NULL, longpoll_thread, thr)) {
+		applog(LOG_ERR, "longpoll thread re-create failed");
+	}
+}
+
+// store current credentials in pools container
+void pool_set_creds(int pooln)
+{
+	struct pool_infos *p = &pools[pooln];
+
+	snprintf(p->url, sizeof(p->url), "%s", rpc_url);
+	snprintf(p->short_url, sizeof(p->short_url), "%s", short_url);
+	snprintf(p->user, sizeof(p->user), "%s", rpc_user);
+	snprintf(p->pass, sizeof(p->pass), "%s", rpc_pass);
+
+	if (rpc_userpass)
+		snprintf(p->userpass, sizeof(p->userpass), "%s", rpc_userpass);
+	else
+		snprintf(p->userpass, sizeof(p->userpass), "%s:%s", rpc_user, rpc_pass);
+
+	if (strlen(rpc_url)) {
+		if (!strncasecmp(rpc_url, "stratum", 7))
+			p->type = POOL_STRATUM;
+		else /* if (!strncasecmp(rpc_url, "http", 4)) */
+			p->type = POOL_GETWORK; // todo: or longpoll
+	}
+}
+
+bool pool_switch(int pooln)
+{
+	int prevn = cur_pooln;
+	struct pool_infos *prev = &pools[cur_pooln];
+	struct pool_infos* p = NULL;
+
+	// save prev stratum connection infos (struct)
+	prev->stratum = stratum;
+
+	if (pooln < num_pools) {
+		cur_pooln = pooln;
+		p = &pools[cur_pooln];
+	} else {
+		applog(LOG_ERR, "Switch to inexistant pool %d!", pooln);
+		return false;
+	}
+
+	// save attributes
+	if (have_longpoll) {
+		prev->type = POOL_LONGPOLL;
+	}
+
+	pthread_mutex_lock(&g_work_lock);
+
+	free(rpc_userpass); rpc_userpass = strdup(p->userpass);
+	free(rpc_user); rpc_user = strdup(p->user);
+	free(rpc_pass); rpc_pass = strdup(p->pass);
+	free(rpc_url);  rpc_url = strdup(p->url);
+	short_url = p->short_url; // just a pointer, no alloc
+
+	want_stratum = have_stratum = (p->type == POOL_STRATUM);
+
+	stratum = p->stratum;
+
+	// keep mutexes from prev pool (should be moved outside stratum struct)
+	stratum.sock_lock = prev->stratum.sock_lock;
+	stratum.work_lock = prev->stratum.work_lock;
+
+	pthread_mutex_unlock(&g_work_lock);
+
+	if (prevn != cur_pooln) {
+		g_work_time = 0;
+		stratum_need_reset = true;
+		restart_threads();
+
+		if (want_stratum && stratum_thr_id == -1) {
+			/* init stratum thread if never made... */
+			struct thr_info *thr;
+			stratum_thr_id = opt_n_threads + 2;
+			thr = &thr_info[stratum_thr_id];
+			thr->id = stratum_thr_id;
+			thr->q = tq_new();
+			if (!thr->q)
+				return false;
+
+			/* start stratum thread */
+			if (unlikely(pthread_create(&thr->pth, NULL, stratum_thread, thr))) {
+				applog(LOG_ERR, "stratum thread create failed");
+				return false;
+			}
+
+			if (have_stratum)
+				tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
+		}
+
+		restart_longpoll();
+
+		applog(LOG_BLUE, "Switch to pool %d: %s", cur_pooln, p->short_url);
+	}
+	return true;
+}
+
+bool pool_switch_next()
+{
+	if (num_pools > 1) {
+		int pooln = (cur_pooln + 1) % num_pools;
+		return pool_switch(pooln);
+	} else {
+		// no switch possible
+		applog(LOG_DEBUG, "No other pools to try...");
+		return false;
+	}
+}
+
+/* seturl from api remote */
+bool pool_switch_url(char *params)
+{
+	int prevn = cur_pooln, nextn;
+	parse_arg('o', params);
+	// cur_pooln modified by parse_arg(), get new pool num
+	nextn = cur_pooln;
+	// and to handle the "hot swap" from current one...
+	cur_pooln = prevn;
+	if (nextn == prevn)
+		return false;
+	return pool_switch(nextn);
+}
+
+void pool_dump_infos()
+{
+	struct pool_infos *p;
+	for (int i=0; i<num_pools; i++) {
+		p = &pools[i];
+		applog(LOG_DEBUG, "POOL %01d: %s USER %s", i, p->short_url, p->user);
+	}
 }
 
 static void show_version_and_exit(void)
@@ -2293,6 +2485,7 @@ void parse_arg(int key, char *arg)
 	case 'p':
 		free(rpc_pass);
 		rpc_pass = strdup(arg);
+		pool_set_creds(cur_pooln);
 		break;
 	case 'P':
 		opt_protocol = true;
@@ -2339,8 +2532,17 @@ void parse_arg(int key, char *arg)
 	case 'u':
 		free(rpc_user);
 		rpc_user = strdup(arg);
+		pool_set_creds(cur_pooln);
 		break;
 	case 'o':			/* --url */
+		if (pools[cur_pooln].type != POOL_UNUSED) {
+			// rotate pool pointer
+			cur_pooln = (cur_pooln + 1) % MAX_POOLS;
+			num_pools = max(cur_pooln+1, num_pools);
+			// change some defaults if multi pools
+			if (opt_retries == -1) opt_retries = 1;
+			if (opt_fail_pause == 30) opt_fail_pause = 5;
+		}
 		p = strstr(arg, "://");
 		if (p) {
 			if (strncasecmp(arg, "http://", 7) && strncasecmp(arg, "https://", 8) &&
@@ -2381,6 +2583,7 @@ void parse_arg(int key, char *arg)
 			short_url = ap;
 		}
 		have_stratum = !opt_benchmark && !strncasecmp(rpc_url, "stratum", 7);
+		pool_set_creds(cur_pooln);
 		break;
 	case 'O':			/* --userpass */
 		p = strchr(arg, ':');
@@ -2393,6 +2596,7 @@ void parse_arg(int key, char *arg)
 		strncpy(rpc_user, arg, p - arg);
 		free(rpc_pass);
 		rpc_pass = strdup(p + 1);
+		pool_set_creds(cur_pooln);
 		break;
 	case 'x':			/* --proxy */
 		if (!strncasecmp(arg, "socks4://", 9))
@@ -2409,6 +2613,7 @@ void parse_arg(int key, char *arg)
 			opt_proxy_type = CURLPROXY_HTTP;
 		free(opt_proxy);
 		opt_proxy = strdup(arg);
+		pool_set_creds(cur_pooln);
 		break;
 	case 1001:
 		free(opt_cert);
@@ -2776,11 +2981,17 @@ int main(int argc, char *argv[])
 
 	/* init stratum data.. */
 	memset(&stratum.url, 0, sizeof(stratum));
+	pthread_mutex_init(&stratum.sock_lock, NULL);
+	pthread_mutex_init(&stratum.work_lock, NULL);
 
 	pthread_mutex_init(&stats_lock, NULL);
 	pthread_mutex_init(&g_work_lock, NULL);
-	pthread_mutex_init(&stratum.sock_lock, NULL);
-	pthread_mutex_init(&stratum.work_lock, NULL);
+
+	/* reset to the first pool (changed during cmdline parsing) */
+	cur_pooln = 0;
+	pool_switch(0);
+	if (opt_debug)
+		pool_dump_infos();
 
 	flags = !opt_benchmark && strncmp(rpc_url, "https:", 6)
 	      ? (CURL_GLOBAL_ALL & ~CURL_GLOBAL_SSL)

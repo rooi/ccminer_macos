@@ -384,15 +384,19 @@ static bool check_remote_access(void)
  * Change pool url (see --url parameter)
  * seturl|stratum+tcp://Danila.1:X@pool.ipominer.com:3335|
  */
-extern bool stratum_need_reset;
 static char *remote_seturl(char *params)
 {
+	bool ret;
 	*buffer = '\0';
 	if (!check_remote_access())
 		return buffer;
-	parse_arg('o', params);
-	stratum_need_reset = true;
-	sprintf(buffer, "%s", "ok|");
+	if (!params || strlen(params) == 0) {
+		// rotate pool test
+		ret = pool_switch_next();
+	} else {
+		ret = pool_switch_url(params);
+	}
+	sprintf(buffer, "%s|", ret ? "ok" : "fail");
 	return buffer;
 }
 
