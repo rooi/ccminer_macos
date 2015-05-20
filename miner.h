@@ -638,6 +638,7 @@ struct pool_infos {
 	int time_limit;
 };
 
+int pool_get_first_valid(int startfrom);
 void pool_set_creds(int pooln);
 void pool_set_attr(int pooln, const char* key, char* arg);
 bool pool_switch_url(char *params);

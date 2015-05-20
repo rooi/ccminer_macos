@@ -1402,6 +1402,7 @@ void restart_threads(void)
 static bool wanna_mine(int thr_id)
 {
 	bool state = true;
+	bool allow_pool_rotate = (thr_id == 0 && num_pools > 1 && !pool_is_switching);
 
 	if (opt_max_temp > 0.0) {
 #ifdef USE_WRAPNVML
@@ -1416,20 +1417,22 @@ static bool wanna_mine(int thr_id)
 #endif
 	}
 	if (opt_max_diff > 0.0 && net_diff > opt_max_diff) {
-		if (conditional_state && !opt_quiet)
+		int next = pool_get_first_valid(cur_pooln+1);
+		if (num_pools > 1 && pools[next].max_diff != pools[cur_pooln].max_diff)
+			conditional_pool_rotate = allow_pool_rotate;
+		if (conditional_state && !opt_quiet && !thr_id)
 			applog(LOG_INFO, "network diff too high, waiting...");
-		if (num_pools > 1 && pools[0].max_diff != pools[1].max_diff)
-			conditional_pool_rotate = true; // to enhance
 		state = false;
 	}
 	if (opt_max_rate > 0.0 && net_hashrate > opt_max_rate) {
-		if (conditional_state && !opt_quiet) {
+		int next = pool_get_first_valid(cur_pooln+1);
+		if (pools[next].max_rate != pools[cur_pooln].max_rate)
+			conditional_pool_rotate = allow_pool_rotate;
+		if (conditional_state && !opt_quiet && !thr_id) {
 			char rate[32];
 			format_hashrate(opt_max_rate, rate);
 			applog(LOG_INFO, "network hashrate too high, waiting %s...", rate);
 		}
-		if (num_pools > 1 && pools[0].max_rate != pools[1].max_rate)
-			conditional_pool_rotate = true; // to enhance
 		state = false;
 	}
 	conditional_state = state;
@@ -1620,10 +1623,11 @@ static void *miner_thread(void *userdata)
 			int passed = (int)(time(NULL) - firstwork_time);
 			int remain = (int)(opt_time_limit - passed);
 			if (remain < 0)  {
-				if (num_pools > 1 && pools[cur_pooln].time_limit) {
+				if (num_pools > 1 && !pool_is_switching && pools[cur_pooln].time_limit) {
 					applog(LOG_NOTICE,
 						"Pool timeout of %ds reached, rotate...", opt_time_limit);
 					pool_switch_next();
+					sleep(1);
 					continue;
 				}
 				app_exit_code = EXIT_CODE_TIME_LIMIT;
@@ -2010,6 +2014,7 @@ wait_lp_url:
 		goto out;
 
 	pooln = cur_pooln;
+	pool_is_switching = false;
 
 start:
 	/* full URL */
@@ -2159,6 +2164,7 @@ wait_stratum_url:
 		goto out;
 
 	pooln = cur_pooln;
+	pool_is_switching = false;
 
 	applog(LOG_BLUE, "Starting on %s", stratum.url);
 
@@ -2398,7 +2404,7 @@ bool pool_switch(int pooln)
 	return true;
 }
 
-static int pool_get_first_valid(int startfrom)
+int pool_get_first_valid(int startfrom)
 {
 	int next = 0;
 	struct pool_infos *p;
@@ -2412,8 +2418,6 @@ static int pool_get_first_valid(int startfrom)
 		next = pooln;
 		break;
 	}
-	if (opt_debug)
-		applog(LOG_DEBUG, "first valid pool is %d", next);
 	return next;
 }
 
