@@ -155,6 +155,7 @@ static const char *algo_names[] = {
 };
 
 bool opt_debug = false;
+bool opt_debug_threads = false;
 bool opt_protocol = false;
 bool opt_benchmark = false;
 bool want_longpoll = true;
@@ -210,6 +211,8 @@ char *jane_params = NULL;
 pool_infos pools[MAX_POOLS] = { 0 };
 int num_pools = 1;
 volatile int cur_pooln = 0;
+bool opt_pool_failover = true;
+volatile bool pool_is_switching = false;
 
 // current connection
 char *rpc_user = NULL;
@@ -1182,7 +1185,8 @@ static void *workio_thread(void *userdata)
 
 	tq_freeze(mythr->q);
 	curl_easy_cleanup(curl);
-
+	if (opt_debug_threads)
+		applog(LOG_DEBUG, "%s() died", __func__);
 	return NULL;
 }
 
@@ -1954,6 +1958,9 @@ static void *miner_thread(void *userdata)
 out:
 	tq_freeze(mythr->q);
 
+	if (opt_debug_threads)
+		applog(LOG_DEBUG, "%s() died", __func__);
+
 	return NULL;
 }
 
@@ -1963,19 +1970,22 @@ static void *longpoll_thread(void *userdata)
 	CURL *curl = NULL;
 	char *hdr_path = NULL, *lp_url = NULL;
 	bool need_slash = false;
-	uint8_t pooln = cur_pooln;
+	int pooln;
 
 	curl = curl_easy_init();
 	if (unlikely(!curl)) {
-		applog(LOG_ERR, "CURL initialization failed");
+		applog(LOG_ERR, "%s() CURL init failed", __func__);
 		goto out;
 	}
 
-start:
-	hdr_path = (char*)tq_pop(mythr->q, NULL);
+wait_lp_url:
+	hdr_path = (char*)tq_pop(mythr->q, NULL); // wait /LP url
 	if (!hdr_path)
 		goto out;
 
+	pooln = cur_pooln;
+
+start:
 	/* full URL */
 	if (strstr(hdr_path, "://")) {
 		lp_url = hdr_path;
@@ -1995,7 +2005,7 @@ start:
 	}
 
 	if (have_stratum)
-		goto out;
+		goto need_reinit;
 
 	applog(LOG_INFO, "Long-polling enabled on %s", lp_url);
 
@@ -2005,14 +2015,14 @@ start:
 
 		// exit on pool switch
 		if (pooln != cur_pooln)
-			goto out;
+			goto need_reinit;
 
 		val = json_rpc_call(curl, lp_url, rpc_userpass, rpc_req,
 				    false, true, &err);
 		if (have_stratum || pooln != cur_pooln) {
 			if (val)
 				json_decref(val);
-			goto out;
+			goto need_reinit;
 		}
 		if (likely(val)) {
 			soval = json_object_get(json_object_get(val, "result"), "submitold");
@@ -2049,14 +2059,25 @@ start:
 	}
 
 out:
+	have_longpoll = false;
+	if (opt_debug_threads)
+		applog(LOG_DEBUG, "%s() died", __func__);
+
 	free(hdr_path);
 	free(lp_url);
 	tq_freeze(mythr->q);
 	if (curl)
 		curl_easy_cleanup(curl);
-	have_longpoll = false;
 
 	return NULL;
+
+need_reinit:
+	/* this thread should not die to allow pool switch */
+	if (opt_debug_threads)
+		applog(LOG_DEBUG, "%s() reinit...", __func__);
+	if (hdr_path) free(hdr_path);
+	if (lp_url) free(lp_url);
+	goto wait_lp_url;
 }
 
 static bool stratum_handle_response(char *buf)
@@ -2102,16 +2123,21 @@ out:
 static void *stratum_thread(void *userdata)
 {
 	struct thr_info *mythr = (struct thr_info *)userdata;
+	stratum_ctx *ctx = &stratum;
+	int pooln = cur_pooln;
 	char *s;
 
+wait_stratum_url:
 	stratum.url = (char*)tq_pop(mythr->q, NULL);
 	if (!stratum.url)
 		goto out;
+
+	pooln = cur_pooln;
+
 	applog(LOG_BLUE, "Starting on %s", stratum.url);
 
 	while (1) {
 		int failures = 0;
-		bool pool_switched = false;
 
 		if (stratum_need_reset) {
 			stratum_need_reset = false;
@@ -2129,6 +2155,7 @@ static void *stratum_thread(void *userdata)
 		while (!stratum.curl) {
 			pthread_mutex_lock(&g_work_lock);
 			g_work_time = 0;
+			g_work.data[0] = 0;
 			pthread_mutex_unlock(&g_work_lock);
 			restart_threads();
 
@@ -2138,25 +2165,24 @@ static void *stratum_thread(void *userdata)
 			{
 				stratum_disconnect(&stratum);
 				if (opt_retries >= 0 && ++failures > opt_retries) {
-					if (!pool_switch_next()) {
+					if (opt_pool_failover) {
+						pool_switch_next();
+					} else {
 						applog(LOG_ERR, "...terminating workio thread");
 						tq_push(thr_info[work_thr_id].q, NULL);
 						//workio_abort();
 						goto out;
-					} else {
-						pool_switched = true;
-						break;
 					}
 				}
+				if (pooln != cur_pooln)
+					goto pool_switched;
 				if (!opt_benchmark)
 					applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
 				sleep(opt_fail_pause);
 			}
 		}
 
-		if (pool_switched || !stratum.url) {
-			continue;
-		}
+		if (pooln != cur_pooln) goto pool_switched;
 
 		if (stratum.job.job_id &&
 		    (!g_work_time || strncmp(stratum.job.job_id, g_work.job_id + 8, 120))) {
@@ -2183,11 +2209,16 @@ static void *stratum_thread(void *userdata)
 			pthread_mutex_unlock(&g_work_lock);
 		}
 		
+		if (pooln != cur_pooln) goto pool_switched;
+
 		if (!stratum_socket_full(&stratum, 120)) {
 			applog(LOG_ERR, "Stratum connection timed out");
 			s = NULL;
 		} else
 			s = stratum_recv_line(&stratum);
+
+		if (pooln != cur_pooln) goto pool_switched;
+
 		if (!s) {
 			stratum_disconnect(&stratum);
 			applog(LOG_ERR, "Stratum connection interrupted");
@@ -2199,25 +2230,22 @@ static void *stratum_thread(void *userdata)
 	}
 
 out:
+	if (opt_debug_threads)
+		applog(LOG_DEBUG, "%s() died", __func__);
+
 	return NULL;
+
+pool_switched:
+	/* this thread should not die on pool switch */
+	stratum_disconnect(&(pools[pooln].stratum));
+	if (opt_debug_threads)
+		applog(LOG_DEBUG, "%s() reinit...", __func__);
+	goto wait_stratum_url;
 }
 
-/* stop and restart longpoll thread on pool switch */
 void restart_longpoll()
 {
-	struct thr_info *thr = &thr_info[longpoll_thr_id];
-
-	// thread should die by itself, but...
-	pthread_cancel(thr->pth);
-	pthread_kill(thr->pth, SIGBREAK);
-	usleep(500*1000);
-
-	g_work.data[0] = 0;
-
-	have_longpoll = false;
-	if (pthread_create(&thr->pth, NULL, longpoll_thread, thr)) {
-		applog(LOG_ERR, "longpoll thread re-create failed");
-	}
+	// tq_push() is made in rpc call...
 }
 
 // store current credentials in pools container
@@ -2292,7 +2320,7 @@ bool pool_switch(int pooln)
 	free(rpc_url);  rpc_url = strdup(p->url);
 	short_url = p->short_url; // just a pointer, no alloc
 
-	want_stratum = have_stratum = (p->type == POOL_STRATUM);
+	want_stratum = have_stratum = (p->type & POOL_STRATUM) != 0;
 
 	stratum = p->stratum;
 
@@ -2304,29 +2332,16 @@ bool pool_switch(int pooln)
 
 	if (prevn != cur_pooln) {
 		g_work_time = 0;
+		g_work.data[0] = 0;
+		pool_is_switching = true;
 		stratum_need_reset = true;
 		restart_threads();
 
-		if (want_stratum && stratum_thr_id == -1) {
-			/* init stratum thread if never made... */
-			struct thr_info *thr;
-			stratum_thr_id = opt_n_threads + 2;
-			thr = &thr_info[stratum_thr_id];
-			thr->id = stratum_thr_id;
-			thr->q = tq_new();
-			if (!thr->q)
-				return false;
-
-			/* start stratum thread */
-			if (unlikely(pthread_create(&thr->pth, NULL, stratum_thread, thr))) {
-				applog(LOG_ERR, "stratum thread create failed");
-				return false;
-			}
-
-			if (have_stratum)
-				tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
+		if (want_stratum && have_stratum) {
+			tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
 		}
 
+		want_longpoll = (p->type & POOL_LONGPOLL) || !(p->type & POOL_STRATUM); // to check
 		restart_longpoll();
 
 		applog(LOG_BLUE, "Switch to pool %d: %s", cur_pooln, p->short_url);
@@ -3242,23 +3257,22 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (want_stratum) {
-		/* init stratum thread info */
-		stratum_thr_id = opt_n_threads + 2;
-		thr = &thr_info[stratum_thr_id];
-		thr->id = stratum_thr_id;
-		thr->q = tq_new();
-		if (!thr->q)
-			return EXIT_CODE_SW_INIT_ERROR;
+	/* stratum thread */
+	stratum_thr_id = opt_n_threads + 2;
+	thr = &thr_info[stratum_thr_id];
+	thr->id = stratum_thr_id;
+	thr->q = tq_new();
+	if (!thr->q)
+		return EXIT_CODE_SW_INIT_ERROR;
 
-		/* start stratum thread */
-		if (unlikely(pthread_create(&thr->pth, NULL, stratum_thread, thr))) {
-			applog(LOG_ERR, "stratum thread create failed");
-			return EXIT_CODE_SW_INIT_ERROR;
-		}
+	/* always start stratum thread (will wait a tq_push) */
+	if (unlikely(pthread_create(&thr->pth, NULL, stratum_thread, thr))) {
+		applog(LOG_ERR, "stratum thread create failed");
+		return EXIT_CODE_SW_INIT_ERROR;
+	}
 
-		if (have_stratum)
-			tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
+	if (have_stratum && want_stratum) {
+		tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
 	}
 
 #ifdef USE_WRAPNVML
