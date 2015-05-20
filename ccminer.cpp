@@ -173,6 +173,7 @@ bool opt_quiet = false;
 static int opt_retries = -1;
 static int opt_fail_pause = 30;
 static int opt_time_limit = 0;
+static time_t firstwork_time = 0;
 int opt_timeout = 270;
 static int opt_scantime = 10;
 static json_t *opt_config;
@@ -213,6 +214,7 @@ int num_pools = 1;
 volatile int cur_pooln = 0;
 bool opt_pool_failover = true;
 volatile bool pool_is_switching = false;
+bool conditional_pool_rotate = false;
 
 // current connection
 char *rpc_user = NULL;
@@ -392,8 +394,11 @@ static struct option const options[] = {
 	{ "max-diff", 1, NULL, 1061 },
 	{ "max-rate", 1, NULL, 1062 },
 	{ "pass", 1, NULL, 'p' },
-	{ "pool-name", 1, NULL, 1100 },    // pool
-	{ "pool-removed", 1, NULL, 1101 }, // pool
+	{ "pool-name", 1, NULL, 1100 },     // pool
+	{ "pool-removed", 1, NULL, 1101 },  // pool
+	{ "pool-time-limit", 1, NULL, 1108 },
+	{ "pool-max-diff", 1, NULL, 1161 }, // pool
+	{ "pool-max-rate", 1, NULL, 1162 }, // pool
 	{ "protocol-dump", 0, NULL, 'P' },
 	{ "proxy", 1, NULL, 'x' },
 	{ "quiet", 0, NULL, 'q' },
@@ -444,8 +449,11 @@ struct opt_config_array {
 	{ CFG_POOL, "pass", NULL },
 	{ CFG_POOL, "userpass", NULL },
 	{ CFG_POOL, "name", "pool-name" },
+	{ CFG_POOL, "max-diff", "pool-max-diff" },
+	{ CFG_POOL, "max-rate", "pool-max-rate" },
 	{ CFG_POOL, "removed",  "pool-removed" },
 	{ CFG_POOL, "disabled", "pool-removed" }, // sample alias
+	{ CFG_POOL, "time-limit", "pool-time-limit" },
 	{ CFG_NULL, NULL, NULL }
 };
 
@@ -1410,6 +1418,8 @@ static bool wanna_mine(int thr_id)
 	if (opt_max_diff > 0.0 && net_diff > opt_max_diff) {
 		if (conditional_state && !opt_quiet)
 			applog(LOG_INFO, "network diff too high, waiting...");
+		if (num_pools > 1 && pools[0].max_diff != pools[1].max_diff)
+			conditional_pool_rotate = true; // to enhance
 		state = false;
 	}
 	if (opt_max_rate > 0.0 && net_hashrate > opt_max_rate) {
@@ -1418,6 +1428,8 @@ static bool wanna_mine(int thr_id)
 			format_hashrate(opt_max_rate, rate);
 			applog(LOG_INFO, "network hashrate too high, waiting %s...", rate);
 		}
+		if (num_pools > 1 && pools[0].max_rate != pools[1].max_rate)
+			conditional_pool_rotate = true; // to enhance
 		state = false;
 	}
 	conditional_state = state;
@@ -1431,7 +1443,6 @@ static void *miner_thread(void *userdata)
 	struct work work;
 	uint32_t max_nonce;
 	uint32_t end_nonce = UINT32_MAX / opt_n_threads * (thr_id + 1) - (thr_id + 1);
-	time_t firstwork_time = 0;
 	bool work_done = false;
 	bool extrajob = false;
 	char s[16];
@@ -1580,6 +1591,14 @@ static void *miner_thread(void *userdata)
 
 		/* conditional mining */
 		if (!wanna_mine(thr_id)) {
+
+			// to enhance... conditional pool switch
+			if (num_pools > 1 && conditional_pool_rotate) {
+				pool_switch_next();
+				sleep(1);
+				continue;
+			}
+
 			sleep(5);
 			continue;
 		}
@@ -1601,6 +1620,12 @@ static void *miner_thread(void *userdata)
 			int passed = (int)(time(NULL) - firstwork_time);
 			int remain = (int)(opt_time_limit - passed);
 			if (remain < 0)  {
+				if (num_pools > 1 && pools[cur_pooln].time_limit) {
+					applog(LOG_NOTICE,
+						"Pool timeout of %ds reached, rotate...", opt_time_limit);
+					pool_switch_next();
+					continue;
+				}
 				app_exit_code = EXIT_CODE_TIME_LIMIT;
 				abort_flag = true;
 				if (opt_benchmark) {
@@ -1610,7 +1635,8 @@ static void *miner_thread(void *userdata)
 					usleep(200*1000);
 					fprintf(stderr, "%llu\n", (long long unsigned int) global_hashrate);
 				} else {
-					applog(LOG_NOTICE, "Mining timeout of %ds reached, exiting...", opt_time_limit);
+					applog(LOG_NOTICE,
+						"Mining timeout of %ds reached, exiting...", opt_time_limit);
 				}
 				workio_abort();
 				break;
@@ -2263,6 +2289,10 @@ void pool_set_creds(int pooln)
 	else
 		snprintf(p->userpass, sizeof(p->userpass), "%s:%s", rpc_user, rpc_pass);
 
+	// init pools options with cmdline ones (if set before -c)
+	p->max_diff = opt_max_diff;
+	p->max_rate = opt_max_rate;
+
 	if (strlen(rpc_url)) {
 		if (!strncasecmp(rpc_url, "stratum", 7))
 			p->type = POOL_STRATUM;
@@ -2273,12 +2303,25 @@ void pool_set_creds(int pooln)
 	p->status |= POOL_ST_DEFINED;
 }
 
+// attributes only set by a json pools config
 void pool_set_attr(int pooln, const char* key, char* arg)
 {
 	struct pool_infos *p = &pools[pooln];
 
 	if (!strcasecmp(key, "name")) {
 		snprintf(p->name, sizeof(p->name), "%s", arg);
+		return;
+	}
+	if (!strcasecmp(key, "max-diff")) {
+		p->max_diff = atof(arg);
+		return;
+	}
+	if (!strcasecmp(key, "max-rate")) {
+		p->max_rate = atof(arg);
+		return;
+	}
+	if (!strcasecmp(key, "time-limit")) {
+		p->time_limit = atoi(arg);
 		return;
 	}
 	if (!strcasecmp(key, "removed")) {
@@ -2290,6 +2333,7 @@ void pool_set_attr(int pooln, const char* key, char* arg)
 	}
 }
 
+// pool switching code
 bool pool_switch(int pooln)
 {
 	int prevn = cur_pooln;
@@ -2319,6 +2363,11 @@ bool pool_switch(int pooln)
 	free(rpc_pass); rpc_pass = strdup(p->pass);
 	free(rpc_url);  rpc_url = strdup(p->url);
 	short_url = p->short_url; // just a pointer, no alloc
+
+	opt_max_diff = p->max_diff;
+	opt_max_rate = p->max_rate;
+	opt_time_limit = p->time_limit;
+	if (opt_time_limit) firstwork_time = 0;
 
 	want_stratum = have_stratum = (p->type & POOL_STRATUM) != 0;
 
@@ -2564,6 +2613,15 @@ void parse_arg(int key, char *arg)
 		break;
 	case 1101: /* pool removed */
 		pool_set_attr(cur_pooln, "removed", arg);
+		break;
+	case 1108: /* pool time-limit */
+		pool_set_attr(cur_pooln, "time-limit", arg);
+		break;
+	case 1161: /* pool max-diff */
+		pool_set_attr(cur_pooln, "max-diff", arg);
+		break;
+	case 1162: /* pool max-rate */
+		pool_set_attr(cur_pooln, "max-rate", arg);
 		break;
 	case 'P':
 		opt_protocol = true;

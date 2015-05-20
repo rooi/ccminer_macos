@@ -632,6 +632,10 @@ struct pool_infos {
 	uint32_t rejected_count;
 	// stratum connection
 	struct stratum_ctx stratum;
+	// other parameters
+	double max_diff;
+	double max_rate;
+	int time_limit;
 };
 
 void pool_set_creds(int pooln);
