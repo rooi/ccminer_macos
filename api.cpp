@@ -181,12 +181,12 @@ static char *getsummary(char *params)
 	sprintf(buffer, "NAME=%s;VER=%s;API=%s;"
 		"ALGO=%s;GPUS=%d;KHS=%.2f;ACC=%d;REJ=%d;"
 		"ACCMN=%.3f;DIFF=%.6f;NETKHS=%.2f;"
-		"WAIT=%u;UPTIME=%.0f;TS=%u|",
+		"POOLS=%u;WAIT=%u;UPTIME=%.0f;TS=%u|",
 		PACKAGE_NAME, PACKAGE_VERSION, APIVERSION,
 		algo, active_gpus, (double)global_hashrate / 1000.,
 		accepted_count, rejected_count,
 		accps, net_diff > 0. ? net_diff : stratum_diff, (double)net_hashrate / 1000.,
-		wait_time, uptime, (uint32_t) ts);
+		num_pools, wait_time, uptime, (uint32_t) ts);
 	return buffer;
 }
 
@@ -210,7 +210,8 @@ static char *getpoolnfo(char *params)
 		cbin2hex(&nonce[2], (const char*) stratum.job.xnonce2, stratum.xnonce2_size);
 	}
 
-	snprintf(s, MYBUFSIZ, "URL=%s;USER=%s;ACC=%d;REJ=%d;H=%u;JOB=%s;DIFF=%.6f;N2SZ=%d;N2=%s;PING=%u;DISCO=%u;WAIT=%u;UPTIME=%u|",
+	snprintf(s, MYBUFSIZ, "URL=%s;USER=%s;ACC=%d;REJ=%d;H=%u;JOB=%s;DIFF=%.6f;"
+		"N2SZ=%d;N2=%s;PING=%u;DISCO=%u;WAIT=%u;UPTIME=%u|",
 		p->url, p->type & POOL_STRATUM ? p->user : "",
 		p->accepted_count, p->rejected_count,
 		stratum.job.height, jobid, stratum_diff,
