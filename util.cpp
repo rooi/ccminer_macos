@@ -964,7 +964,7 @@ void stratum_disconnect(struct stratum_ctx *sctx)
 {
 	pthread_mutex_lock(&sctx->sock_lock);
 	if (sctx->curl) {
-		sctx->disconnects++;
+		pools[sctx->pooln].disconnects++;
 		curl_easy_cleanup(sctx->curl);
 		sctx->curl = NULL;
 		sctx->sockbuf[0] = '\0';

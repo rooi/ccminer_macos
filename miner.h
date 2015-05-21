@@ -580,7 +580,7 @@ struct stratum_ctx {
 
 	struct timeval tv_submit;
 	uint32_t answer_msec;
-	uint32_t disconnects;
+	int pooln;
 	time_t tm_connected;
 
 	int srvtime_diff;
@@ -610,6 +610,7 @@ struct work {
 
 #define MAX_POOLS 8
 struct pool_infos {
+	uint8_t id;
 #define POOL_UNUSED   0
 #define POOL_GETWORK  1
 #define POOL_STRATUM  2
@@ -624,19 +625,31 @@ struct pool_infos {
 	// credentials
 	char url[256];
 	char short_url[64];
-	char userpass[128];
 	char user[64];
 	char pass[64];
-	// stats
-	uint32_t accepted_count;
-	uint32_t rejected_count;
-	// stratum connection
-	struct stratum_ctx stratum;
-	// other parameters
+	// config options
 	double max_diff;
 	double max_rate;
 	int time_limit;
+	int scantime;
+	// connection
+	struct stratum_ctx stratum;
+	uint8_t allow_gbt;
+	uint8_t allow_mininginfo;
+	int retries;
+	int fail_pause;
+	int timeout;
+	// stats
+	uint32_t work_time;
+	uint32_t wait_time;
+	uint32_t accepted_count;
+	uint32_t rejected_count;
+	uint32_t disconnects;
 };
+
+extern struct pool_infos pools[MAX_POOLS];
+extern int num_pools;
+extern volatile int cur_pooln;
 
 int pool_get_first_valid(int startfrom);
 void pool_set_creds(int pooln);

@@ -209,7 +209,7 @@ bool abort_flag = false;
 char *jane_params = NULL;
 
 // pools (failover/getwork infos)
-pool_infos pools[MAX_POOLS] = { 0 };
+struct pool_infos pools[MAX_POOLS] = { 0 };
 int num_pools = 1;
 volatile int cur_pooln = 0;
 bool opt_pool_failover = true;
@@ -240,8 +240,6 @@ uint32_t zr5_pok = 0;
 
 pthread_mutex_t applog_lock;
 static pthread_mutex_t stats_lock;
-uint32_t accepted_count = 0L;
-uint32_t rejected_count = 0L;
 static double thr_hashrates[MAX_GPUS] = { 0 };
 uint64_t global_hashrate = 0;
 double   stratum_diff = 0.0;
@@ -396,6 +394,7 @@ static struct option const options[] = {
 	{ "pass", 1, NULL, 'p' },
 	{ "pool-name", 1, NULL, 1100 },     // pool
 	{ "pool-removed", 1, NULL, 1101 },  // pool
+	{ "pool-scantime", 1, NULL, 1102 }, // pool
 	{ "pool-time-limit", 1, NULL, 1108 },
 	{ "pool-max-diff", 1, NULL, 1161 }, // pool
 	{ "pool-max-rate", 1, NULL, 1162 }, // pool
@@ -449,6 +448,7 @@ struct opt_config_array {
 	{ CFG_POOL, "pass", NULL },
 	{ CFG_POOL, "userpass", NULL },
 	{ CFG_POOL, "name", "pool-name" },
+	{ CFG_POOL, "scantime", "pool-scantime" },
 	{ CFG_POOL, "max-diff", "pool-max-diff" },
 	{ CFG_POOL, "max-rate", "pool-max-rate" },
 	{ CFG_POOL, "removed",  "pool-removed" },
@@ -717,6 +717,7 @@ static int share_result(int result, const char *reason)
 {
 	char s[32] = { 0 };
 	double hashrate = 0.;
+	struct pool_infos *p = &pools[cur_pooln];
 
 	pthread_mutex_lock(&stats_lock);
 
@@ -724,16 +725,16 @@ static int share_result(int result, const char *reason)
 		hashrate += stats_get_speed(i, thr_hashrates[i]);
 	}
 
-	result ? accepted_count++ : rejected_count++;
+	result ? p->accepted_count++ : p->rejected_count++;
 	pthread_mutex_unlock(&stats_lock);
 
 	global_hashrate = llround(hashrate);
 
 	format_hashrate(hashrate, s);
 	applog(LOG_NOTICE, "accepted: %lu/%lu (%.2f%%), %s %s",
-			accepted_count,
-			accepted_count + rejected_count,
-			100. * accepted_count / (accepted_count + rejected_count),
+			p->accepted_count,
+			p->accepted_count + p->rejected_count,
+			100. * p->accepted_count / (p->accepted_count + p->rejected_count),
 			s,
 			use_colors ?
 				(result ? CL_GRN "yay!!!" : CL_RED "booooo")
@@ -958,7 +959,7 @@ static bool get_blocktemplate(CURL *curl, struct work *work)
 
 	int curl_err = 0;
 	json_t *val = json_rpc_call(curl, rpc_url, rpc_userpass, gbt_req,
-			    want_longpoll, have_longpoll, &curl_err);
+			    false, false, &curl_err);
 
 	if (!val && curl_err == -1) {
 		// when getblocktemplate is not supported, disable it
@@ -1595,14 +1596,14 @@ static void *miner_thread(void *userdata)
 		/* conditional mining */
 		if (!wanna_mine(thr_id)) {
 
-			// to enhance... conditional pool switch
-			if (num_pools > 1 && conditional_pool_rotate) {
+			// conditional pool switch
+			if (num_pools > 1 && !pool_is_switching && conditional_pool_rotate) {
 				pool_switch_next();
 				sleep(1);
 				continue;
 			}
 
-			sleep(5);
+			sleep(5); pools[cur_pooln].wait_time += 5;
 			continue;
 		}
 
@@ -1623,10 +1624,12 @@ static void *miner_thread(void *userdata)
 			int passed = (int)(time(NULL) - firstwork_time);
 			int remain = (int)(opt_time_limit - passed);
 			if (remain < 0)  {
-				if (num_pools > 1 && !pool_is_switching && pools[cur_pooln].time_limit) {
-					applog(LOG_NOTICE,
-						"Pool timeout of %ds reached, rotate...", opt_time_limit);
-					pool_switch_next();
+				if (num_pools > 1 && pools[cur_pooln].time_limit) {
+					if (!pool_is_switching) {
+						applog(LOG_NOTICE,
+							"Pool timeout of %ds reached, rotate...", opt_time_limit);
+						pool_switch_next();
+					}
 					sleep(1);
 					continue;
 				}
@@ -1948,6 +1951,9 @@ static void *miner_thread(void *userdata)
 				applog(LOG_NOTICE, "Total: %s", s);
 			}
 
+			// since pool start
+			pools[cur_pooln].work_time = (uint32_t) (time(NULL) - firstwork_time);
+
 			// X-Mining-Hashrate
 			global_hashrate = llround(hashrate);
 		}
@@ -2163,10 +2169,11 @@ wait_stratum_url:
 	if (!stratum.url)
 		goto out;
 
-	pooln = cur_pooln;
+	ctx->pooln = pooln = cur_pooln;
 	pool_is_switching = false;
 
-	applog(LOG_BLUE, "Starting on %s", stratum.url);
+	if (!pool_is_switching)
+		applog(LOG_BLUE, "Starting on %s", stratum.url);
 
 	while (1) {
 		int failures = 0;
@@ -2275,11 +2282,6 @@ pool_switched:
 	goto wait_stratum_url;
 }
 
-void restart_longpoll()
-{
-	// tq_push() is made in rpc call...
-}
-
 // store current credentials in pools container
 void pool_set_creds(int pooln)
 {
@@ -2290,14 +2292,10 @@ void pool_set_creds(int pooln)
 	snprintf(p->user, sizeof(p->user), "%s", rpc_user);
 	snprintf(p->pass, sizeof(p->pass), "%s", rpc_pass);
 
-	if (rpc_userpass)
-		snprintf(p->userpass, sizeof(p->userpass), "%s", rpc_userpass);
-	else
-		snprintf(p->userpass, sizeof(p->userpass), "%s:%s", rpc_user, rpc_pass);
-
 	// init pools options with cmdline ones (if set before -c)
 	p->max_diff = opt_max_diff;
 	p->max_rate = opt_max_rate;
+	p->scantime = opt_scantime;
 
 	if (strlen(rpc_url)) {
 		if (!strncasecmp(rpc_url, "stratum", 7))
@@ -2316,6 +2314,10 @@ void pool_set_attr(int pooln, const char* key, char* arg)
 
 	if (!strcasecmp(key, "name")) {
 		snprintf(p->name, sizeof(p->name), "%s", arg);
+		return;
+	}
+	if (!strcasecmp(key, "scantime")) {
+		p->scantime = atoi(arg);
 		return;
 	}
 	if (!strcasecmp(key, "max-diff")) {
@@ -2364,20 +2366,23 @@ bool pool_switch(int pooln)
 
 	pthread_mutex_lock(&g_work_lock);
 
-	free(rpc_userpass); rpc_userpass = strdup(p->userpass);
 	free(rpc_user); rpc_user = strdup(p->user);
 	free(rpc_pass); rpc_pass = strdup(p->pass);
+	free(rpc_userpass);
+	rpc_userpass = (char*) malloc(strlen(rpc_user)+strlen(rpc_pass)+2);
+	if (rpc_userpass) sprintf(rpc_userpass, "%s:%s", rpc_user, rpc_pass);
 	free(rpc_url);  rpc_url = strdup(p->url);
 	short_url = p->short_url; // just a pointer, no alloc
 
 	opt_max_diff = p->max_diff;
 	opt_max_rate = p->max_rate;
 	opt_time_limit = p->time_limit;
-	if (opt_time_limit) firstwork_time = 0;
+	opt_scantime = p->scantime;
 
 	want_stratum = have_stratum = (p->type & POOL_STRATUM) != 0;
 
 	stratum = p->stratum;
+	stratum.pooln = cur_pooln;
 
 	// keep mutexes from prev pool (should be moved outside stratum struct)
 	stratum.sock_lock = prev->stratum.sock_lock;
@@ -2390,14 +2395,15 @@ bool pool_switch(int pooln)
 		g_work.data[0] = 0;
 		pool_is_switching = true;
 		stratum_need_reset = true;
+		// change to get the pool uptime
+		firstwork_time = time(NULL);
 		restart_threads();
 
 		if (want_stratum && have_stratum) {
 			tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
 		}
 
-		want_longpoll = (p->type & POOL_LONGPOLL) || !(p->type & POOL_STRATUM); // to check
-		restart_longpoll();
+		want_longpoll = (p->type & POOL_LONGPOLL) || !(p->type & POOL_STRATUM);
 
 		applog(LOG_BLUE, "Switch to pool %d: %s", cur_pooln, p->short_url);
 	}
@@ -2611,21 +2617,6 @@ void parse_arg(int key, char *arg)
 		free(rpc_pass);
 		rpc_pass = strdup(arg);
 		pool_set_creds(cur_pooln);
-		break;
-	case 1100: /* pool name */
-		pool_set_attr(cur_pooln, "name", arg);
-		break;
-	case 1101: /* pool removed */
-		pool_set_attr(cur_pooln, "removed", arg);
-		break;
-	case 1108: /* pool time-limit */
-		pool_set_attr(cur_pooln, "time-limit", arg);
-		break;
-	case 1161: /* pool max-diff */
-		pool_set_attr(cur_pooln, "max-diff", arg);
-		break;
-	case 1162: /* pool max-rate */
-		pool_set_attr(cur_pooln, "max-rate", arg);
 		break;
 	case 'P':
 		opt_protocol = true;
@@ -2899,6 +2890,28 @@ void parse_arg(int key, char *arg)
 			show_usage_and_exit(1);
 		opt_difficulty = d;
 		break;
+
+	/* PER POOL CONFIG OPTIONS */
+
+	case 1100: /* pool name */
+		pool_set_attr(cur_pooln, "name", arg);
+		break;
+	case 1101: /* pool removed */
+		pool_set_attr(cur_pooln, "removed", arg);
+		break;
+	case 1102: /* pool scantime */
+		pool_set_attr(cur_pooln, "scantime", arg);
+		break;
+	case 1108: /* pool time-limit */
+		pool_set_attr(cur_pooln, "time-limit", arg);
+		break;
+	case 1161: /* pool max-diff */
+		pool_set_attr(cur_pooln, "max-diff", arg);
+		break;
+	case 1162: /* pool max-rate */
+		pool_set_attr(cur_pooln, "max-rate", arg);
+		break;
+
 	case 'V':
 		show_version_and_exit();
 	case 'h':
@@ -3303,20 +3316,18 @@ int main(int argc, char *argv[])
 		return EXIT_CODE_SW_INIT_ERROR;
 	}
 
-	if (want_longpoll && !have_stratum) {
-		/* init longpoll thread info */
-		longpoll_thr_id = opt_n_threads + 1;
-		thr = &thr_info[longpoll_thr_id];
-		thr->id = longpoll_thr_id;
-		thr->q = tq_new();
-		if (!thr->q)
-			return EXIT_CODE_SW_INIT_ERROR;
+	/* longpoll thread */
+	longpoll_thr_id = opt_n_threads + 1;
+	thr = &thr_info[longpoll_thr_id];
+	thr->id = longpoll_thr_id;
+	thr->q = tq_new();
+	if (!thr->q)
+		return EXIT_CODE_SW_INIT_ERROR;
 
-		/* start longpoll thread */
-		if (unlikely(pthread_create(&thr->pth, NULL, longpoll_thread, thr))) {
-			applog(LOG_ERR, "longpoll thread create failed");
-			return EXIT_CODE_SW_INIT_ERROR;
-		}
+	/* always start stratum thread (will wait a tq_push) */
+	if (unlikely(pthread_create(&thr->pth, NULL, longpoll_thread, thr))) {
+		applog(LOG_ERR, "longpoll thread create failed");
+		return EXIT_CODE_SW_INIT_ERROR;
 	}
 
 	/* stratum thread */
