@@ -2388,12 +2388,12 @@ bool pool_switch(int pooln)
 		return false;
 	}
 
-	// save attributes
+	// save global attributes
+	prev->allow_mininginfo = allow_mininginfo;
+	prev->allow_gbt = allow_gbt;
+	prev->check_dups = check_dups;
 	if (have_longpoll) {
 		prev->type = POOL_LONGPOLL;
-		prev->allow_mininginfo = allow_mininginfo;
-		prev->allow_gbt = allow_gbt;
-		prev->check_dups = check_dups;
 	}
 
 	pthread_mutex_lock(&g_work_lock);
