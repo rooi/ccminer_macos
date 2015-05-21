@@ -1597,8 +1597,14 @@ static void *miner_thread(void *userdata)
 		if (!wanna_mine(thr_id)) {
 
 			// conditional pool switch
-			if (num_pools > 1 && !pool_is_switching && conditional_pool_rotate) {
-				pool_switch_next();
+			if (num_pools > 1 && conditional_pool_rotate) {
+				if (!pool_is_switching)
+					pool_switch_next();
+				else if (time(NULL) - firstwork_time > 30) {
+					applog(LOG_WARNING, "Pool switching timed out...");
+					pools[cur_pooln].wait_time += 1;
+					pool_is_switching = false;
+				}
 				sleep(1);
 				continue;
 			}
@@ -1629,6 +1635,13 @@ static void *miner_thread(void *userdata)
 						applog(LOG_NOTICE,
 							"Pool timeout of %ds reached, rotate...", opt_time_limit);
 						pool_switch_next();
+					} else {
+						// ensure we dont stay locked there...
+						if (time(NULL) - firstwork_time > 30) {
+							applog(LOG_WARNING, "Pool switching timed out...");
+							pools[cur_pooln].wait_time += 1;
+							pool_is_switching = false;
+						}
 					}
 					sleep(1);
 					continue;

@@ -423,16 +423,25 @@ struct stats_data {
 	uint32_t tm_stat;
 	uint32_t hashcount;
 	uint32_t height;
+
 	double difficulty;
 	double hashrate;
+
 	uint8_t thr_id;
 	uint8_t gpu_id;
 	uint8_t hashfound;
 	uint8_t ignored;
+
+	uint8_t npool;
+	uint8_t pool_type;
+	uint16_t align;
 };
 
 struct hashlog_data {
-	uint32_t tm_sent;
+	uint8_t npool;
+	uint8_t pool_type;
+	uint16_t align;
+
 	uint32_t height;
 	uint32_t njobid;
 	uint32_t nonce;
@@ -441,6 +450,7 @@ struct hashlog_data {
 	uint32_t last_from;
 	uint32_t tm_add;
 	uint32_t tm_upd;
+	uint32_t tm_sent;
 };
 
 /* end of api */

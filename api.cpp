@@ -349,9 +349,9 @@ static char *getscanlog(char *params)
 	*buffer = '\0';
 	for (int i = 0; i < records; i++) {
 		time_t ts = data[i].tm_upd;
-		p += sprintf(p, "H=%u;JOB=%u;N=%u;FROM=0x%x;SCANTO=0x%x;"
+		p += sprintf(p, "H=%u;P=%u;JOB=%u;N=%u;FROM=0x%x;SCANTO=0x%x;"
 				"COUNT=0x%x;FOUND=%u;TS=%u|",
-			data[i].height, data[i].njobid, data[i].nonce, data[i].scanned_from, data[i].scanned_to,
+			data[i].height, data[i].npool, data[i].njobid, data[i].nonce, data[i].scanned_from, data[i].scanned_to,
 			(data[i].scanned_to - data[i].scanned_from), data[i].tm_sent ? 1 : 0, (uint32_t)ts);
 	}
 	return buffer;
@@ -460,8 +460,8 @@ struct CMDS {
 	{ "scanlog", getscanlog },
 
 	/* remote functions */
-	{ "switchpool", remote_switchpool },
 	{ "seturl",  remote_seturl }, /* prefer switchpool, deprecated */
+	{ "switchpool", remote_switchpool },
 	{ "quit",    remote_quit },
 
 	/* keep it the last */
