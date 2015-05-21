@@ -646,6 +646,7 @@ struct pool_infos {
 	struct stratum_ctx stratum;
 	uint8_t allow_gbt;
 	uint8_t allow_mininginfo;
+	uint16_t check_dups; // 16_t for align
 	int retries;
 	int fail_pause;
 	int timeout;

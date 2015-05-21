@@ -30,7 +30,6 @@
 #include <windows.h>
 #include <stdint.h>
 #else
-#define SIGBREAK SIGINT
 #include <errno.h>
 #include <sys/resource.h>
 #if HAVE_SYS_SYSCTL_H
@@ -247,7 +246,7 @@ double   net_diff = 0;
 uint64_t net_hashrate = 0;
 uint64_t net_blocks = 0;
 // conditional mining
-bool conditional_state = true;
+uint8_t conditional_state[MAX_GPUS] = { 0 };
 double opt_max_temp = 0.0;
 double opt_max_diff = 0.0;
 double opt_max_rate = 0.0;
@@ -578,7 +577,8 @@ static void calc_network_diff(struct work *work)
 	uchar rtarget[48] = { 0 };
 	uint64_t diffone = 0xFFFF000000000000ull; //swab64(0xFFFFull);
 	uint64_t *data64, d64;
-	uint32_t nbits = have_stratum ? swab32(work->data[18]) : work->data[18];
+	// todo: endian reversed on longpoll could be zr5 specific...
+	uint32_t nbits = have_longpoll ? work->data[18] : swab32(work->data[18]);
 	uint32_t shift = (swab32(nbits) & 0xff); // 0x1c = 28
 	uint32_t bits = (nbits & 0xffffff);
 	int shfb = 8 * (26 - (shift - 3));
@@ -625,7 +625,8 @@ static void calc_network_diff(struct work *work)
 		d64 = 1;
 	net_diff = (double)diffone / d64; // 43.281
 	if (opt_debug)
-		applog(LOG_DEBUG, "diff: %08x -> shift %u, bits %08x, shfb %d -> %.5f", nbits, shift, bits, shfb, net_diff);
+		applog(LOG_DEBUG, "diff: %08x -> shift %u, bits %08x, shfb %d -> %.5f (pool %u)",
+			nbits, shift, bits, shfb, net_diff, work->pooln);
 }
 
 static bool work_decode(const json_t *val, struct work *work)
@@ -1192,10 +1193,10 @@ static void *workio_thread(void *userdata)
 		workio_cmd_free(wc);
 	}
 
-	tq_freeze(mythr->q);
-	curl_easy_cleanup(curl);
 	if (opt_debug_threads)
 		applog(LOG_DEBUG, "%s() died", __func__);
+	curl_easy_cleanup(curl);
+	tq_freeze(mythr->q);
 	return NULL;
 }
 
@@ -1410,7 +1411,7 @@ static bool wanna_mine(int thr_id)
 		struct cgpu_info * cgpu = &thr_info[thr_id].gpu;
 		float temp = gpu_temp(cgpu);
 		if (temp > opt_max_temp) {
-			if (conditional_state && !opt_quiet)
+			if (!conditional_state[thr_id] && !opt_quiet)
 				applog(LOG_INFO, "GPU #%d: temperature too high (%.0f°c), waiting...",
 					device_map[thr_id], temp);
 			state = false;
@@ -1421,7 +1422,7 @@ static bool wanna_mine(int thr_id)
 		int next = pool_get_first_valid(cur_pooln+1);
 		if (num_pools > 1 && pools[next].max_diff != pools[cur_pooln].max_diff)
 			conditional_pool_rotate = allow_pool_rotate;
-		if (conditional_state && !opt_quiet && !thr_id)
+		if (!conditional_state[thr_id] && !opt_quiet && !thr_id)
 			applog(LOG_INFO, "network diff too high, waiting...");
 		state = false;
 	}
@@ -1429,14 +1430,14 @@ static bool wanna_mine(int thr_id)
 		int next = pool_get_first_valid(cur_pooln+1);
 		if (pools[next].max_rate != pools[cur_pooln].max_rate)
 			conditional_pool_rotate = allow_pool_rotate;
-		if (conditional_state && !opt_quiet && !thr_id) {
+		if (!conditional_state[thr_id] && !opt_quiet && !thr_id) {
 			char rate[32];
 			format_hashrate(opt_max_rate, rate);
 			applog(LOG_INFO, "network hashrate too high, waiting %s...", rate);
 		}
 		state = false;
 	}
-	conditional_state = state;
+	conditional_state[thr_id] = (uint8_t) !state;
 	return state;
 }
 
@@ -1600,8 +1601,9 @@ static void *miner_thread(void *userdata)
 			if (num_pools > 1 && conditional_pool_rotate) {
 				if (!pool_is_switching)
 					pool_switch_next();
-				else if (time(NULL) - firstwork_time > 30) {
-					applog(LOG_WARNING, "Pool switching timed out...");
+				else if (time(NULL) - firstwork_time > 35) {
+					if (!opt_quiet)
+						applog(LOG_WARNING, "Pool switching timed out...");
 					pools[cur_pooln].wait_time += 1;
 					pool_is_switching = false;
 				}
@@ -1632,12 +1634,12 @@ static void *miner_thread(void *userdata)
 			if (remain < 0)  {
 				if (num_pools > 1 && pools[cur_pooln].time_limit) {
 					if (!pool_is_switching) {
-						applog(LOG_NOTICE,
-							"Pool timeout of %ds reached, rotate...", opt_time_limit);
+						if (!opt_quiet)
+							applog(LOG_NOTICE, "Pool timeout of %ds reached, rotate...", opt_time_limit);
 						pool_switch_next();
 					} else {
 						// ensure we dont stay locked there...
-						if (time(NULL) - firstwork_time > 30) {
+						if (time(NULL) - firstwork_time > 35) {
 							applog(LOG_WARNING, "Pool switching timed out...");
 							pools[cur_pooln].wait_time += 1;
 							pool_is_switching = false;
@@ -2005,11 +2007,9 @@ static void *miner_thread(void *userdata)
 	}
 
 out:
-	tq_freeze(mythr->q);
-
 	if (opt_debug_threads)
 		applog(LOG_DEBUG, "%s() died", __func__);
-
+	tq_freeze(mythr->q);
 	return NULL;
 }
 
@@ -2057,7 +2057,7 @@ start:
 	if (have_stratum)
 		goto need_reinit;
 
-	applog(LOG_INFO, "Long-polling enabled on %s", lp_url);
+	applog(LOG_BLUE, "Long-polling enabled on %s", lp_url);
 
 	while (1) {
 		json_t *val = NULL, *soval;
@@ -2066,6 +2066,9 @@ start:
 		// exit on pool switch
 		if (pooln != cur_pooln)
 			goto need_reinit;
+
+		// not always reset on simple rotate (longpoll 0 -> stratum 1 -> longpoll 0)
+		pool_is_switching = false;
 
 		val = json_rpc_call(curl, lp_url, rpc_userpass, rpc_req,
 				    false, true, &err);
@@ -2183,10 +2186,11 @@ wait_stratum_url:
 		goto out;
 
 	ctx->pooln = pooln = cur_pooln;
-	pool_is_switching = false;
 
 	if (!pool_is_switching)
 		applog(LOG_BLUE, "Starting on %s", stratum.url);
+
+	pool_is_switching = false;
 
 	while (1) {
 		int failures = 0;
@@ -2197,6 +2201,7 @@ wait_stratum_url:
 				stratum.url = strdup(rpc_url);
 			else
 				stratum_disconnect(&stratum);
+			/* should not be used anymore, but... */
 			if (strcmp(stratum.url, rpc_url)) {
 				free(stratum.url);
 				stratum.url = strdup(rpc_url);
@@ -2218,6 +2223,7 @@ wait_stratum_url:
 				stratum_disconnect(&stratum);
 				if (opt_retries >= 0 && ++failures > opt_retries) {
 					if (opt_pool_failover) {
+						applog(LOG_WARNING, "Stratum connect timeout, failover...");
 						pool_switch_next();
 					} else {
 						applog(LOG_ERR, "...terminating workio thread");
@@ -2259,6 +2265,9 @@ wait_stratum_url:
 						strtoul(stratum.job.job_id, NULL, 16), stratum.job.height);
 			}
 			pthread_mutex_unlock(&g_work_lock);
+			// not always reset on simple rotate (stratum pool 1 -> longpoll 0 -> stratum 1)
+			if (pooln == cur_pooln)
+				pool_is_switching = false;
 		}
 		
 		if (pooln != cur_pooln) goto pool_switched;
@@ -2290,6 +2299,7 @@ out:
 pool_switched:
 	/* this thread should not die on pool switch */
 	stratum_disconnect(&(pools[pooln].stratum));
+	if (stratum.url) free(stratum.url); stratum.url = NULL;
 	if (opt_debug_threads)
 		applog(LOG_DEBUG, "%s() reinit...", __func__);
 	goto wait_stratum_url;
@@ -2299,6 +2309,12 @@ pool_switched:
 void pool_set_creds(int pooln)
 {
 	struct pool_infos *p = &pools[pooln];
+
+	p->id = pooln;
+	// default flags not 0
+	p->allow_mininginfo = allow_mininginfo;
+	p->allow_gbt = allow_gbt;
+	p->check_dups = check_dups;
 
 	snprintf(p->url, sizeof(p->url), "%s", rpc_url);
 	snprintf(p->short_url, sizeof(p->short_url), "%s", short_url);
@@ -2375,6 +2391,9 @@ bool pool_switch(int pooln)
 	// save attributes
 	if (have_longpoll) {
 		prev->type = POOL_LONGPOLL;
+		prev->allow_mininginfo = allow_mininginfo;
+		prev->allow_gbt = allow_gbt;
+		prev->check_dups = check_dups;
 	}
 
 	pthread_mutex_lock(&g_work_lock);
@@ -2387,10 +2406,11 @@ bool pool_switch(int pooln)
 	free(rpc_url);  rpc_url = strdup(p->url);
 	short_url = p->short_url; // just a pointer, no alloc
 
+	opt_scantime = p->scantime;
+
 	opt_max_diff = p->max_diff;
 	opt_max_rate = p->max_rate;
 	opt_time_limit = p->time_limit;
-	opt_scantime = p->scantime;
 
 	want_stratum = have_stratum = (p->type & POOL_STRATUM) != 0;
 
@@ -2408,21 +2428,30 @@ bool pool_switch(int pooln)
 		g_work.data[0] = 0;
 		pool_is_switching = true;
 		stratum_need_reset = true;
-		// change to get the pool uptime
+		// used to get the pool uptime
 		firstwork_time = time(NULL);
 		restart_threads();
 
-		if (want_stratum && have_stratum) {
+		// restore flags
+		allow_gbt = p->allow_gbt;
+		allow_mininginfo = p->allow_mininginfo;
+		check_dups = p->check_dups;
+
+		if (want_stratum) {
+			// unlock the stratum thread
 			tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
 		}
 
+		// will unlock the longpoll thread on /LP url receive
 		want_longpoll = (p->type & POOL_LONGPOLL) || !(p->type & POOL_STRATUM);
 
-		applog(LOG_BLUE, "Switch to pool %d: %s", cur_pooln, p->short_url);
+		applog(LOG_BLUE, "Switch to pool %d: %s", cur_pooln,
+			strlen(p->name) ? p->name : p->short_url);
 	}
 	return true;
 }
 
+// search available pool
 int pool_get_first_valid(int startfrom)
 {
 	int next = 0;
@@ -2440,6 +2469,7 @@ int pool_get_first_valid(int startfrom)
 	return next;
 }
 
+// switch to next available pool
 bool pool_switch_next()
 {
 	if (num_pools > 1) {
@@ -2447,17 +2477,18 @@ bool pool_switch_next()
 		return pool_switch(pooln);
 	} else {
 		// no switch possible
-		applog(LOG_DEBUG, "No other pools to try...");
+		if (!opt_quiet)
+			applog(LOG_DEBUG, "No other pools to try...");
 		return false;
 	}
 }
 
-/* seturl from api remote */
+// seturl from api remote
 bool pool_switch_url(char *params)
 {
 	int prevn = cur_pooln, nextn;
 	parse_arg('o', params);
-	// cur_pooln modified by parse_arg(), get new pool num
+	// cur_pooln modified by parse_arg('o'), get new pool num
 	nextn = cur_pooln;
 	// and to handle the "hot swap" from current one...
 	cur_pooln = prevn;
@@ -2466,12 +2497,14 @@ bool pool_switch_url(char *params)
 	return pool_switch(nextn);
 }
 
+// debug stuff
 void pool_dump_infos()
 {
 	struct pool_infos *p;
 	for (int i=0; i<num_pools; i++) {
 		p = &pools[i];
-		applog(LOG_DEBUG, "POOL %01d: %s USER %s", i, p->short_url, p->user);
+		applog(LOG_DEBUG, "POOL %01d: %s USER %s -s %d", i,
+			p->short_url, p->user, p->scantime);
 	}
 }
 
@@ -3337,7 +3370,7 @@ int main(int argc, char *argv[])
 	if (!thr->q)
 		return EXIT_CODE_SW_INIT_ERROR;
 
-	/* always start stratum thread (will wait a tq_push) */
+	/* always start the longpoll thread (will wait a tq_push) */
 	if (unlikely(pthread_create(&thr->pth, NULL, longpoll_thread, thr))) {
 		applog(LOG_ERR, "longpoll thread create failed");
 		return EXIT_CODE_SW_INIT_ERROR;
@@ -3351,7 +3384,7 @@ int main(int argc, char *argv[])
 	if (!thr->q)
 		return EXIT_CODE_SW_INIT_ERROR;
 
-	/* always start stratum thread (will wait a tq_push) */
+	/* always start the stratum thread (will wait a tq_push) */
 	if (unlikely(pthread_create(&thr->pth, NULL, stratum_thread, thr))) {
 		applog(LOG_ERR, "stratum thread create failed");
 		return EXIT_CODE_SW_INIT_ERROR;
