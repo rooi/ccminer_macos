@@ -539,8 +539,6 @@ extern uint32_t gpus_intensity[MAX_GPUS];
 extern void format_hashrate(double hashrate, char *output);
 extern void applog(int prio, const char *fmt, ...);
 void get_defconfig_path(char *out, size_t bufsize, char *argv0);
-extern json_t *json_rpc_call(CURL *curl, const char *url, const char *userpass,
-	const char *rpc_req, bool, bool, int *);
 extern void cbin2hex(char *out, const char *in, size_t len);
 extern char *bin2hex(const unsigned char *in, size_t len);
 extern bool hex2bin(unsigned char *p, const char *hexstr, size_t len);
@@ -577,7 +575,6 @@ struct stratum_ctx {
 	curl_socket_t sock;
 	size_t sockbuf_size;
 	char *sockbuf;
-	pthread_mutex_t sock_lock;
 
 	double next_diff;
 
@@ -586,7 +583,6 @@ struct stratum_ctx {
 	unsigned char *xnonce1;
 	size_t xnonce2_size;
 	struct stratum_job job;
-	pthread_mutex_t work_lock;
 
 	struct timeval tv_submit;
 	uint32_t answer_msec;
@@ -668,6 +664,11 @@ void pool_set_attr(int pooln, const char* key, char* arg);
 bool pool_switch_url(char *params);
 bool pool_switch(int pooln);
 bool pool_switch_next(void);
+
+json_t * json_rpc_call_pool(CURL *curl, struct pool_infos*,
+	const char *req, bool lp_scan, bool lp, int *err);
+json_t * json_rpc_longpoll(CURL *curl, char *lp_url, struct pool_infos*,
+	const char *req, int *err);
 
 bool stratum_socket_full(struct stratum_ctx *sctx, int timeout);
 bool stratum_send_line(struct stratum_ctx *sctx, char *s);
