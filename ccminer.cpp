@@ -2077,8 +2077,6 @@ wait_lp_url:
 	// to detect pool switch during loop
 	switchn = pool_switch_count;
 
-	pool_is_switching = false;
-
 	/* full URL */
 	if (strstr(hdr_path, "://")) {
 		lp_url = hdr_path;
@@ -2097,7 +2095,10 @@ wait_lp_url:
 		sprintf(lp_url, "%s%s%s", rpc_url, need_slash ? "/" : "", copy_start);
 	}
 
-	applog(LOG_BLUE, "Long-polling on %s", lp_url);
+	if (!pool_is_switching)
+		applog(LOG_BLUE, "Long-polling on %s", lp_url);
+
+	pool_is_switching = false;
 
 	pool->type |= POOL_LONGPOLL;
 
@@ -2216,6 +2217,7 @@ out:
 static void *stratum_thread(void *userdata)
 {
 	struct thr_info *mythr = (struct thr_info *)userdata;
+	struct pool_infos *pool;
 	stratum_ctx *ctx = &stratum;
 	int pooln, switchn;
 	char *s;
@@ -2230,6 +2232,8 @@ wait_stratum_url:
 
 	ctx->pooln = pooln = cur_pooln;
 	switchn = pool_switch_count;
+	pool = &pools[pooln];
+
 	pool_is_switching = false;
 	stratum_need_reset = false;
 
@@ -2238,16 +2242,10 @@ wait_stratum_url:
 
 		if (stratum_need_reset) {
 			stratum_need_reset = false;
-			if (!stratum.url)
-				stratum.url = strdup(rpc_url);
-			else
+			if (stratum.url)
 				stratum_disconnect(&stratum);
-			/* should not be used anymore, but... */
-			if (strcmp(stratum.url, rpc_url)) {
-				free(stratum.url);
-				stratum.url = strdup(rpc_url);
-				applog(LOG_BLUE, "Connection changed to %s", short_url);
-			}
+			else
+				stratum.url = strdup(pool->url); // may be useless
 		}
 
 		while (!stratum.curl) {
@@ -2257,9 +2255,9 @@ wait_stratum_url:
 			pthread_mutex_unlock(&g_work_lock);
 			restart_threads();
 
-			if (!stratum_connect(&stratum, stratum.url) ||
+			if (!stratum_connect(&stratum, pool->url) ||
 			    !stratum_subscribe(&stratum) ||
-			    !stratum_authorize(&stratum, rpc_user, rpc_pass))
+			    !stratum_authorize(&stratum, pool->user, pool->pass))
 			{
 				stratum_disconnect(&stratum);
 				if (opt_retries >= 0 && ++failures > opt_retries) {
@@ -2268,8 +2266,8 @@ wait_stratum_url:
 						pool_switch_next();
 					} else {
 						applog(LOG_ERR, "...terminating workio thread");
-						tq_push(thr_info[work_thr_id].q, NULL);
-						//workio_abort();
+						//tq_push(thr_info[work_thr_id].q, NULL);
+						workio_abort();
 						goto out;
 					}
 				}
@@ -2294,7 +2292,7 @@ wait_stratum_url:
 						applog(LOG_BLUE, "%s block %d, diff %.2f", algo_names[opt_algo],
 							stratum.job.height, net_diff);
 					else
-						applog(LOG_BLUE, "%s %s block %d", short_url, algo_names[opt_algo],
+						applog(LOG_BLUE, "%s %s block %d", pool->short_url, algo_names[opt_algo],
 							stratum.job.height);
 				}
 				restart_threads();
@@ -2302,23 +2300,24 @@ wait_stratum_url:
 					hashlog_purge_old();
 				stats_purge_old();
 			} else if (opt_debug && !opt_quiet) {
-					applog(LOG_BLUE, "%s asks job %d for block %d", short_url,
+					applog(LOG_BLUE, "%s asks job %d for block %d", pool->short_url,
 						strtoul(stratum.job.job_id, NULL, 16), stratum.job.height);
 			}
 			pthread_mutex_unlock(&g_work_lock);
-			// not always reset on simple rotate (stratum pool 1 -> longpoll 0 -> stratum 1)
-			if (switchn == pool_switch_count)
-				pool_is_switching = false;
 		}
 		
+		// check we are on the right pool
 		if (switchn != pool_switch_count) goto pool_switched;
 
 		if (!stratum_socket_full(&stratum, opt_timeout)) {
-			applog(LOG_ERR, "Stratum connection timed out");
+			if (!opt_quiet)
+				applog(LOG_WARNING, "Stratum connection timed out");
 			s = NULL;
+			continue;
 		} else
 			s = stratum_recv_line(&stratum);
 
+		// double check we are on the right pool
 		if (switchn != pool_switch_count) goto pool_switched;
 
 		if (!s) {

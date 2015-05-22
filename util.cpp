@@ -492,8 +492,7 @@ static json_t *json_rpc_call(CURL *curl, const char *url,
 	}
 
 	if (!all_data.buf || !all_data.len) {
-		// can happen on longpoll timeout
-		if (opt_protocol || keepalive)
+		if (!have_longpoll) // seems normal on longpoll timeout
 			applog(LOG_ERR, "Empty data received in json_rpc_call.");
 		goto err_out;
 	}
