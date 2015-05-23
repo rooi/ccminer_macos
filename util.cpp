@@ -993,6 +993,25 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 	return true;
 }
 
+void stratum_free_job(struct stratum_ctx *sctx)
+{
+	pthread_mutex_lock(&stratum_work_lock);
+	if (sctx->job.job_id) {
+		free(sctx->job.job_id);
+	}
+	if (sctx->job.merkle_count) {
+		for (int i = 0; i < sctx->job.merkle_count; i++) {
+			free(sctx->job.merkle[i]);
+			sctx->job.merkle[i] = NULL;
+		}
+		free(sctx->job.merkle);
+	}
+	free(sctx->job.coinbase);
+	// note: xnonce2 is not allocated
+	memset(&(sctx->job.job_id), 0, sizeof(struct stratum_job));
+	pthread_mutex_unlock(&stratum_work_lock);
+}
+
 void stratum_disconnect(struct stratum_ctx *sctx)
 {
 	pthread_mutex_lock(&stratum_sock_lock);
@@ -1004,6 +1023,9 @@ void stratum_disconnect(struct stratum_ctx *sctx)
 			sctx->sockbuf[0] = '\0';
 		// free(sctx->sockbuf);
 		// sctx->sockbuf = NULL;
+	}
+	if (sctx->job.job_id) {
+		stratum_free_job(sctx);
 	}
 	pthread_mutex_unlock(&stratum_sock_lock);
 }

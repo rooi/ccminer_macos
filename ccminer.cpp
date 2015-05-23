@@ -2310,10 +2310,9 @@ wait_stratum_url:
 		if (switchn != pool_switch_count) goto pool_switched;
 
 		if (!stratum_socket_full(&stratum, opt_timeout)) {
-			if (!opt_quiet)
+			if (opt_debug)
 				applog(LOG_WARNING, "Stratum connection timed out");
 			s = NULL;
-			continue;
 		} else
 			s = stratum_recv_line(&stratum);
 
@@ -2322,7 +2321,7 @@ wait_stratum_url:
 
 		if (!s) {
 			stratum_disconnect(&stratum);
-			applog(LOG_ERR, "Stratum connection interrupted");
+			applog(LOG_WARNING, "Stratum connection interrupted");
 			continue;
 		}
 		if (!stratum_handle_method(&stratum, s))
@@ -2418,8 +2417,12 @@ bool pool_switch(int pooln)
 	struct pool_infos* p = NULL;
 
 	// save prev stratum connection infos (struct)
-	if (prev->type & POOL_STRATUM)
+	if (prev->type & POOL_STRATUM) {
+		// may not be the right moment to free,
+		// to check if required on submit...
+		stratum_free_job(&stratum);
 		prev->stratum = stratum;
+	}
 
 	if (pooln < num_pools) {
 		cur_pooln = pooln;
