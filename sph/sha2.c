@@ -1,630 +1,693 @@
+/* $Id: sha2.c 227 2010-06-16 17:28:38Z tp $ */
 /*
- * Copyright 2011 ArtForz
- * Copyright 2011-2013 pooler
+ * SHA-224 / SHA-256 implementation.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.  See COPYING for more details.
+ * ==========================(LICENSE BEGIN)============================
+ *
+ * Copyright (c) 2007-2010  Projet RNRT SAPHIR
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * ===========================(LICENSE END)=============================
+ *
+ * @author   Thomas Pornin <thomas.pornin@cryptolog.com>
  */
 
-#include "cpuminer-config.h"
-#include "miner.h"
-
+#include <stddef.h>
 #include <string.h>
-#include <inttypes.h>
 
-#if defined(__arm__) && defined(__APCS_32__)
-#define EXTERN_SHA256
+#include "sph_sha2.h"
+
+#if SPH_SMALL_FOOTPRINT && !defined SPH_SMALL_FOOTPRINT_SHA2
+#define SPH_SMALL_FOOTPRINT_SHA2   1
 #endif
 
-static const uint32_t sha256_h[8] = {
-	0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-	0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+#define CH(X, Y, Z)    ((((Y) ^ (Z)) & (X)) ^ (Z))
+#define MAJ(X, Y, Z)   (((Y) & (Z)) | (((Y) | (Z)) & (X)))
+
+#define ROTR    SPH_ROTR32
+
+#define BSG2_0(x)      (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
+#define BSG2_1(x)      (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
+#define SSG2_0(x)      (ROTR(x, 7) ^ ROTR(x, 18) ^ SPH_T32((x) >> 3))
+#define SSG2_1(x)      (ROTR(x, 17) ^ ROTR(x, 19) ^ SPH_T32((x) >> 10))
+
+static const sph_u32 H224[8] = {
+	SPH_C32(0xC1059ED8), SPH_C32(0x367CD507), SPH_C32(0x3070DD17),
+	SPH_C32(0xF70E5939), SPH_C32(0xFFC00B31), SPH_C32(0x68581511),
+	SPH_C32(0x64F98FA7), SPH_C32(0xBEFA4FA4)
 };
 
-static const uint32_t sha256_k[64] = {
-	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-	0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-	0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-	0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-	0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+static const sph_u32 H256[8] = {
+	SPH_C32(0x6A09E667), SPH_C32(0xBB67AE85), SPH_C32(0x3C6EF372),
+	SPH_C32(0xA54FF53A), SPH_C32(0x510E527F), SPH_C32(0x9B05688C),
+	SPH_C32(0x1F83D9AB), SPH_C32(0x5BE0CD19)
 };
-
-void sha256_init(uint32_t *state)
-{
-	memcpy(state, sha256_h, 32);
-}
-
-/* Elementary functions used by SHA256 */
-#define Ch(x, y, z)     ((x & (y ^ z)) ^ z)
-#define Maj(x, y, z)    ((x & (y | z)) | (y & z))
-#define ROTR(x, n)      ((x >> n) | (x << (32 - n)))
-#define S0(x)           (ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22))
-#define S1(x)           (ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25))
-#define s0(x)           (ROTR(x, 7) ^ ROTR(x, 18) ^ (x >> 3))
-#define s1(x)           (ROTR(x, 17) ^ ROTR(x, 19) ^ (x >> 10))
-
-/* SHA256 round function */
-#define RND(a, b, c, d, e, f, g, h, k) \
-	do { \
-		t0 = h + S1(e) + Ch(e, f, g) + k; \
-		t1 = S0(a) + Maj(a, b, c); \
-		d += t0; \
-		h  = t0 + t1; \
-	} while (0)
-
-/* Adjusted round function for rotating state */
-#define RNDr(S, W, i) \
-	RND(S[(64 - i) % 8], S[(65 - i) % 8], \
-	    S[(66 - i) % 8], S[(67 - i) % 8], \
-	    S[(68 - i) % 8], S[(69 - i) % 8], \
-	    S[(70 - i) % 8], S[(71 - i) % 8], \
-	    W[i] + sha256_k[i])
-
-#ifndef EXTERN_SHA256
 
 /*
- * SHA256 block compression function.  The 256-bit state is transformed via
- * the 512-bit input block to produce a new state.
+ * The SHA2_ROUND_BODY defines the body for a SHA-224 / SHA-256
+ * compression function implementation. The "in" parameter should
+ * evaluate, when applied to a numerical input parameter from 0 to 15,
+ * to an expression which yields the corresponding input block. The "r"
+ * parameter should evaluate to an array or pointer expression
+ * designating the array of 8 words which contains the input and output
+ * of the compression function.
  */
-void sha256_transform(uint32_t *state, const uint32_t *block, int swap)
-{
-	uint32_t W[64];
-	uint32_t S[8];
-	uint32_t t0, t1;
-	int i;
 
-	/* 1. Prepare message schedule W. */
-	if (swap) {
-		for (i = 0; i < 16; i++)
-			W[i] = swab32(block[i]);
-	} else
-		memcpy(W, block, 64);
-	for (i = 16; i < 64; i += 2) {
-		W[i]   = s1(W[i - 2]) + W[i - 7] + s0(W[i - 15]) + W[i - 16];
-		W[i+1] = s1(W[i - 1]) + W[i - 6] + s0(W[i - 14]) + W[i - 15];
-	}
+#if SPH_SMALL_FOOTPRINT_SHA2
 
-	/* 2. Initialize working variables. */
-	memcpy(S, state, 32);
-
-	/* 3. Mix. */
-	RNDr(S, W,  0);
-	RNDr(S, W,  1);
-	RNDr(S, W,  2);
-	RNDr(S, W,  3);
-	RNDr(S, W,  4);
-	RNDr(S, W,  5);
-	RNDr(S, W,  6);
-	RNDr(S, W,  7);
-	RNDr(S, W,  8);
-	RNDr(S, W,  9);
-	RNDr(S, W, 10);
-	RNDr(S, W, 11);
-	RNDr(S, W, 12);
-	RNDr(S, W, 13);
-	RNDr(S, W, 14);
-	RNDr(S, W, 15);
-	RNDr(S, W, 16);
-	RNDr(S, W, 17);
-	RNDr(S, W, 18);
-	RNDr(S, W, 19);
-	RNDr(S, W, 20);
-	RNDr(S, W, 21);
-	RNDr(S, W, 22);
-	RNDr(S, W, 23);
-	RNDr(S, W, 24);
-	RNDr(S, W, 25);
-	RNDr(S, W, 26);
-	RNDr(S, W, 27);
-	RNDr(S, W, 28);
-	RNDr(S, W, 29);
-	RNDr(S, W, 30);
-	RNDr(S, W, 31);
-	RNDr(S, W, 32);
-	RNDr(S, W, 33);
-	RNDr(S, W, 34);
-	RNDr(S, W, 35);
-	RNDr(S, W, 36);
-	RNDr(S, W, 37);
-	RNDr(S, W, 38);
-	RNDr(S, W, 39);
-	RNDr(S, W, 40);
-	RNDr(S, W, 41);
-	RNDr(S, W, 42);
-	RNDr(S, W, 43);
-	RNDr(S, W, 44);
-	RNDr(S, W, 45);
-	RNDr(S, W, 46);
-	RNDr(S, W, 47);
-	RNDr(S, W, 48);
-	RNDr(S, W, 49);
-	RNDr(S, W, 50);
-	RNDr(S, W, 51);
-	RNDr(S, W, 52);
-	RNDr(S, W, 53);
-	RNDr(S, W, 54);
-	RNDr(S, W, 55);
-	RNDr(S, W, 56);
-	RNDr(S, W, 57);
-	RNDr(S, W, 58);
-	RNDr(S, W, 59);
-	RNDr(S, W, 60);
-	RNDr(S, W, 61);
-	RNDr(S, W, 62);
-	RNDr(S, W, 63);
-
-	/* 4. Mix local working variables into global state */
-	for (i = 0; i < 8; i++)
-		state[i] += S[i];
-}
-
-#endif /* EXTERN_SHA256 */
-
-
-static const uint32_t sha256d_hash1[16] = {
-	0x00000000, 0x00000000, 0x00000000, 0x00000000,
-	0x00000000, 0x00000000, 0x00000000, 0x00000000,
-	0x80000000, 0x00000000, 0x00000000, 0x00000000,
-	0x00000000, 0x00000000, 0x00000000, 0x00000100
+static const sph_u32 K[64] = {
+	SPH_C32(0x428A2F98), SPH_C32(0x71374491),
+	SPH_C32(0xB5C0FBCF), SPH_C32(0xE9B5DBA5),
+	SPH_C32(0x3956C25B), SPH_C32(0x59F111F1),
+	SPH_C32(0x923F82A4), SPH_C32(0xAB1C5ED5),
+	SPH_C32(0xD807AA98), SPH_C32(0x12835B01),
+	SPH_C32(0x243185BE), SPH_C32(0x550C7DC3),
+	SPH_C32(0x72BE5D74), SPH_C32(0x80DEB1FE),
+	SPH_C32(0x9BDC06A7), SPH_C32(0xC19BF174),
+	SPH_C32(0xE49B69C1), SPH_C32(0xEFBE4786),
+	SPH_C32(0x0FC19DC6), SPH_C32(0x240CA1CC),
+	SPH_C32(0x2DE92C6F), SPH_C32(0x4A7484AA),
+	SPH_C32(0x5CB0A9DC), SPH_C32(0x76F988DA),
+	SPH_C32(0x983E5152), SPH_C32(0xA831C66D),
+	SPH_C32(0xB00327C8), SPH_C32(0xBF597FC7),
+	SPH_C32(0xC6E00BF3), SPH_C32(0xD5A79147),
+	SPH_C32(0x06CA6351), SPH_C32(0x14292967),
+	SPH_C32(0x27B70A85), SPH_C32(0x2E1B2138),
+	SPH_C32(0x4D2C6DFC), SPH_C32(0x53380D13),
+	SPH_C32(0x650A7354), SPH_C32(0x766A0ABB),
+	SPH_C32(0x81C2C92E), SPH_C32(0x92722C85),
+	SPH_C32(0xA2BFE8A1), SPH_C32(0xA81A664B),
+	SPH_C32(0xC24B8B70), SPH_C32(0xC76C51A3),
+	SPH_C32(0xD192E819), SPH_C32(0xD6990624),
+	SPH_C32(0xF40E3585), SPH_C32(0x106AA070),
+	SPH_C32(0x19A4C116), SPH_C32(0x1E376C08),
+	SPH_C32(0x2748774C), SPH_C32(0x34B0BCB5),
+	SPH_C32(0x391C0CB3), SPH_C32(0x4ED8AA4A),
+	SPH_C32(0x5B9CCA4F), SPH_C32(0x682E6FF3),
+	SPH_C32(0x748F82EE), SPH_C32(0x78A5636F),
+	SPH_C32(0x84C87814), SPH_C32(0x8CC70208),
+	SPH_C32(0x90BEFFFA), SPH_C32(0xA4506CEB),
+	SPH_C32(0xBEF9A3F7), SPH_C32(0xC67178F2)
 };
 
-static void sha256d_80_swap(uint32_t *hash, const uint32_t *data)
-{
-	uint32_t S[16];
-	int i;
+#define SHA2_MEXP1(in, pc)   do { \
+		W[pc] = in(pc); \
+	} while (0)
 
-	sha256_init(S);
-	sha256_transform(S, data, 0);
-	sha256_transform(S, data + 16, 0);
-	memcpy(S + 8, sha256d_hash1 + 8, 32);
-	sha256_init(hash);
-	sha256_transform(hash, S, 0);
-	for (i = 0; i < 8; i++)
-		hash[i] = swab32(hash[i]);
-}
+#define SHA2_MEXP2(in, pc)   do { \
+		W[(pc) & 0x0F] = SPH_T32(SSG2_1(W[((pc) - 2) & 0x0F]) \
+			+ W[((pc) - 7) & 0x0F] \
+			+ SSG2_0(W[((pc) - 15) & 0x0F]) + W[(pc) & 0x0F]); \
+	} while (0)
 
-void sha256d(unsigned char *hash, const unsigned char *data, int len)
-{
-	uint32_t S[16], T[16];
-	int i, r;
+#define SHA2_STEPn(n, a, b, c, d, e, f, g, h, in, pc)   do { \
+		sph_u32 t1, t2; \
+		SHA2_MEXP ## n(in, pc); \
+		t1 = SPH_T32(h + BSG2_1(e) + CH(e, f, g) \
+			+ K[pcount + (pc)] + W[(pc) & 0x0F]); \
+		t2 = SPH_T32(BSG2_0(a) + MAJ(a, b, c)); \
+		d = SPH_T32(d + t1); \
+		h = SPH_T32(t1 + t2); \
+	} while (0)
 
-	sha256_init(S);
-	for (r = len; r > -9; r -= 64) {
-		if (r < 64)
-			memset(T, 0, 64);
-		memcpy(T, data + len - r, r > 64 ? 64 : (r < 0 ? 0 : r));
-		if (r >= 0 && r < 64)
-			((unsigned char *)T)[r] = 0x80;
-		for (i = 0; i < 16; i++)
-			T[i] = be32dec(T + i);
-		if (r < 56)
-			T[15] = 8 * len;
-		sha256_transform(S, T, 0);
-	}
-	memcpy(S + 8, sha256d_hash1 + 8, 32);
-	sha256_init(T);
-	sha256_transform(T, S, 0);
-	for (i = 0; i < 8; i++)
-		be32enc((uint32_t *)hash + i, T[i]);
-}
+#define SHA2_STEP1(a, b, c, d, e, f, g, h, in, pc) \
+	SHA2_STEPn(1, a, b, c, d, e, f, g, h, in, pc)
+#define SHA2_STEP2(a, b, c, d, e, f, g, h, in, pc) \
+	SHA2_STEPn(2, a, b, c, d, e, f, g, h, in, pc)
 
-static inline void sha256d_preextend(uint32_t *W)
-{
-	W[16] = s1(W[14]) + W[ 9] + s0(W[ 1]) + W[ 0];
-	W[17] = s1(W[15]) + W[10] + s0(W[ 2]) + W[ 1];
-	W[18] = s1(W[16]) + W[11]             + W[ 2];
-	W[19] = s1(W[17]) + W[12] + s0(W[ 4]);
-	W[20] =             W[13] + s0(W[ 5]) + W[ 4];
-	W[21] =             W[14] + s0(W[ 6]) + W[ 5];
-	W[22] =             W[15] + s0(W[ 7]) + W[ 6];
-	W[23] =             W[16] + s0(W[ 8]) + W[ 7];
-	W[24] =             W[17] + s0(W[ 9]) + W[ 8];
-	W[25] =                     s0(W[10]) + W[ 9];
-	W[26] =                     s0(W[11]) + W[10];
-	W[27] =                     s0(W[12]) + W[11];
-	W[28] =                     s0(W[13]) + W[12];
-	W[29] =                     s0(W[14]) + W[13];
-	W[30] =                     s0(W[15]) + W[14];
-	W[31] =                     s0(W[16]) + W[15];
-}
-
-static inline void sha256d_prehash(uint32_t *S, const uint32_t *W)
-{
-	uint32_t t0, t1;
-	RNDr(S, W, 0);
-	RNDr(S, W, 1);
-	RNDr(S, W, 2);
-}
-
-#ifdef EXTERN_SHA256
-
-void sha256d_ms(uint32_t *hash, uint32_t *W,
-	const uint32_t *midstate, const uint32_t *prehash);
+#define SHA2_ROUND_BODY(in, r)   do { \
+		sph_u32 A, B, C, D, E, F, G, H; \
+		sph_u32 W[16]; \
+		unsigned pcount; \
+ \
+		A = (r)[0]; \
+		B = (r)[1]; \
+		C = (r)[2]; \
+		D = (r)[3]; \
+		E = (r)[4]; \
+		F = (r)[5]; \
+		G = (r)[6]; \
+		H = (r)[7]; \
+		pcount = 0; \
+		SHA2_STEP1(A, B, C, D, E, F, G, H, in,  0); \
+		SHA2_STEP1(H, A, B, C, D, E, F, G, in,  1); \
+		SHA2_STEP1(G, H, A, B, C, D, E, F, in,  2); \
+		SHA2_STEP1(F, G, H, A, B, C, D, E, in,  3); \
+		SHA2_STEP1(E, F, G, H, A, B, C, D, in,  4); \
+		SHA2_STEP1(D, E, F, G, H, A, B, C, in,  5); \
+		SHA2_STEP1(C, D, E, F, G, H, A, B, in,  6); \
+		SHA2_STEP1(B, C, D, E, F, G, H, A, in,  7); \
+		SHA2_STEP1(A, B, C, D, E, F, G, H, in,  8); \
+		SHA2_STEP1(H, A, B, C, D, E, F, G, in,  9); \
+		SHA2_STEP1(G, H, A, B, C, D, E, F, in, 10); \
+		SHA2_STEP1(F, G, H, A, B, C, D, E, in, 11); \
+		SHA2_STEP1(E, F, G, H, A, B, C, D, in, 12); \
+		SHA2_STEP1(D, E, F, G, H, A, B, C, in, 13); \
+		SHA2_STEP1(C, D, E, F, G, H, A, B, in, 14); \
+		SHA2_STEP1(B, C, D, E, F, G, H, A, in, 15); \
+		for (pcount = 16; pcount < 64; pcount += 16) { \
+			SHA2_STEP2(A, B, C, D, E, F, G, H, in,  0); \
+			SHA2_STEP2(H, A, B, C, D, E, F, G, in,  1); \
+			SHA2_STEP2(G, H, A, B, C, D, E, F, in,  2); \
+			SHA2_STEP2(F, G, H, A, B, C, D, E, in,  3); \
+			SHA2_STEP2(E, F, G, H, A, B, C, D, in,  4); \
+			SHA2_STEP2(D, E, F, G, H, A, B, C, in,  5); \
+			SHA2_STEP2(C, D, E, F, G, H, A, B, in,  6); \
+			SHA2_STEP2(B, C, D, E, F, G, H, A, in,  7); \
+			SHA2_STEP2(A, B, C, D, E, F, G, H, in,  8); \
+			SHA2_STEP2(H, A, B, C, D, E, F, G, in,  9); \
+			SHA2_STEP2(G, H, A, B, C, D, E, F, in, 10); \
+			SHA2_STEP2(F, G, H, A, B, C, D, E, in, 11); \
+			SHA2_STEP2(E, F, G, H, A, B, C, D, in, 12); \
+			SHA2_STEP2(D, E, F, G, H, A, B, C, in, 13); \
+			SHA2_STEP2(C, D, E, F, G, H, A, B, in, 14); \
+			SHA2_STEP2(B, C, D, E, F, G, H, A, in, 15); \
+		} \
+		(r)[0] = SPH_T32((r)[0] + A); \
+		(r)[1] = SPH_T32((r)[1] + B); \
+		(r)[2] = SPH_T32((r)[2] + C); \
+		(r)[3] = SPH_T32((r)[3] + D); \
+		(r)[4] = SPH_T32((r)[4] + E); \
+		(r)[5] = SPH_T32((r)[5] + F); \
+		(r)[6] = SPH_T32((r)[6] + G); \
+		(r)[7] = SPH_T32((r)[7] + H); \
+	} while (0)
 
 #else
 
-static inline void sha256d_ms(uint32_t *hash, uint32_t *W,
-	const uint32_t *midstate, const uint32_t *prehash)
-{
-	uint32_t S[64];
-	uint32_t t0, t1;
-	int i;
+#define SHA2_ROUND_BODY(in, r)   do { \
+		sph_u32 A, B, C, D, E, F, G, H, T1, T2; \
+		sph_u32 W00, W01, W02, W03, W04, W05, W06, W07; \
+		sph_u32 W08, W09, W10, W11, W12, W13, W14, W15; \
+		int i; \
+ \
+/* for (i=0;i<8;i++) {printf("in[%d]=%08x in[%d]=%08x \n",2*i,in(2*i),2*i+1,in(2*i+1));} */ \
+ 		A = (r)[0]; \
+		B = (r)[1]; \
+		C = (r)[2]; \
+		D = (r)[3]; \
+		E = (r)[4]; \
+		F = (r)[5]; \
+		G = (r)[6]; \
+		H = (r)[7]; \
+		W00 = in(0); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0x428A2F98) + W00); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W01 = in(1); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0x71374491) + W01); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W02 = in(2); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0xB5C0FBCF) + W02); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W03 = in(3); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0xE9B5DBA5) + W03); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W04 = in(4); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0x3956C25B) + W04); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W05 = in(5); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0x59F111F1) + W05); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W06 = in(6); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0x923F82A4) + W06); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W07 = in(7); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0xAB1C5ED5) + W07); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		W08 = in(8); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0xD807AA98) + W08); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W09 = in(9); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0x12835B01) + W09); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W10 = in(10); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0x243185BE) + W10); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W11 = in(11); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0x550C7DC3) + W11); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W12 = in(12); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0x72BE5D74) + W12); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W13 = in(13); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0x80DEB1FE) + W13); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W14 = in(14); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0x9BDC06A7) + W14); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W15 = in(15); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0xC19BF174) + W15); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		W00 = SPH_T32(SSG2_1(W14) + W09 + SSG2_0(W01) + W00); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0xE49B69C1) + W00); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W01 = SPH_T32(SSG2_1(W15) + W10 + SSG2_0(W02) + W01); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0xEFBE4786) + W01); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W02 = SPH_T32(SSG2_1(W00) + W11 + SSG2_0(W03) + W02); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0x0FC19DC6) + W02); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W03 = SPH_T32(SSG2_1(W01) + W12 + SSG2_0(W04) + W03); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0x240CA1CC) + W03); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W04 = SPH_T32(SSG2_1(W02) + W13 + SSG2_0(W05) + W04); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0x2DE92C6F) + W04); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W05 = SPH_T32(SSG2_1(W03) + W14 + SSG2_0(W06) + W05); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0x4A7484AA) + W05); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W06 = SPH_T32(SSG2_1(W04) + W15 + SSG2_0(W07) + W06); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0x5CB0A9DC) + W06); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W07 = SPH_T32(SSG2_1(W05) + W00 + SSG2_0(W08) + W07); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0x76F988DA) + W07); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		W08 = SPH_T32(SSG2_1(W06) + W01 + SSG2_0(W09) + W08); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0x983E5152) + W08); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W09 = SPH_T32(SSG2_1(W07) + W02 + SSG2_0(W10) + W09); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0xA831C66D) + W09); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W10 = SPH_T32(SSG2_1(W08) + W03 + SSG2_0(W11) + W10); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0xB00327C8) + W10); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W11 = SPH_T32(SSG2_1(W09) + W04 + SSG2_0(W12) + W11); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0xBF597FC7) + W11); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W12 = SPH_T32(SSG2_1(W10) + W05 + SSG2_0(W13) + W12); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0xC6E00BF3) + W12); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W13 = SPH_T32(SSG2_1(W11) + W06 + SSG2_0(W14) + W13); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0xD5A79147) + W13); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W14 = SPH_T32(SSG2_1(W12) + W07 + SSG2_0(W15) + W14); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0x06CA6351) + W14); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W15 = SPH_T32(SSG2_1(W13) + W08 + SSG2_0(W00) + W15); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0x14292967) + W15); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		W00 = SPH_T32(SSG2_1(W14) + W09 + SSG2_0(W01) + W00); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0x27B70A85) + W00); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W01 = SPH_T32(SSG2_1(W15) + W10 + SSG2_0(W02) + W01); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0x2E1B2138) + W01); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W02 = SPH_T32(SSG2_1(W00) + W11 + SSG2_0(W03) + W02); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0x4D2C6DFC) + W02); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W03 = SPH_T32(SSG2_1(W01) + W12 + SSG2_0(W04) + W03); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0x53380D13) + W03); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W04 = SPH_T32(SSG2_1(W02) + W13 + SSG2_0(W05) + W04); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0x650A7354) + W04); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W05 = SPH_T32(SSG2_1(W03) + W14 + SSG2_0(W06) + W05); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0x766A0ABB) + W05); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W06 = SPH_T32(SSG2_1(W04) + W15 + SSG2_0(W07) + W06); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0x81C2C92E) + W06); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W07 = SPH_T32(SSG2_1(W05) + W00 + SSG2_0(W08) + W07); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0x92722C85) + W07); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		W08 = SPH_T32(SSG2_1(W06) + W01 + SSG2_0(W09) + W08); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0xA2BFE8A1) + W08); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W09 = SPH_T32(SSG2_1(W07) + W02 + SSG2_0(W10) + W09); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0xA81A664B) + W09); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W10 = SPH_T32(SSG2_1(W08) + W03 + SSG2_0(W11) + W10); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0xC24B8B70) + W10); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W11 = SPH_T32(SSG2_1(W09) + W04 + SSG2_0(W12) + W11); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0xC76C51A3) + W11); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W12 = SPH_T32(SSG2_1(W10) + W05 + SSG2_0(W13) + W12); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0xD192E819) + W12); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W13 = SPH_T32(SSG2_1(W11) + W06 + SSG2_0(W14) + W13); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0xD6990624) + W13); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W14 = SPH_T32(SSG2_1(W12) + W07 + SSG2_0(W15) + W14); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0xF40E3585) + W14); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W15 = SPH_T32(SSG2_1(W13) + W08 + SSG2_0(W00) + W15); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0x106AA070) + W15); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		W00 = SPH_T32(SSG2_1(W14) + W09 + SSG2_0(W01) + W00); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0x19A4C116) + W00); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W01 = SPH_T32(SSG2_1(W15) + W10 + SSG2_0(W02) + W01); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0x1E376C08) + W01); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W02 = SPH_T32(SSG2_1(W00) + W11 + SSG2_0(W03) + W02); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0x2748774C) + W02); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W03 = SPH_T32(SSG2_1(W01) + W12 + SSG2_0(W04) + W03); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0x34B0BCB5) + W03); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W04 = SPH_T32(SSG2_1(W02) + W13 + SSG2_0(W05) + W04); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0x391C0CB3) + W04); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W05 = SPH_T32(SSG2_1(W03) + W14 + SSG2_0(W06) + W05); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0x4ED8AA4A) + W05); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W06 = SPH_T32(SSG2_1(W04) + W15 + SSG2_0(W07) + W06); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0x5B9CCA4F) + W06); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W07 = SPH_T32(SSG2_1(W05) + W00 + SSG2_0(W08) + W07); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0x682E6FF3) + W07); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		W08 = SPH_T32(SSG2_1(W06) + W01 + SSG2_0(W09) + W08); \
+		T1 = SPH_T32(H + BSG2_1(E) + CH(E, F, G) \
+			+ SPH_C32(0x748F82EE) + W08); \
+		T2 = SPH_T32(BSG2_0(A) + MAJ(A, B, C)); \
+		D = SPH_T32(D + T1); \
+		H = SPH_T32(T1 + T2); \
+		W09 = SPH_T32(SSG2_1(W07) + W02 + SSG2_0(W10) + W09); \
+		T1 = SPH_T32(G + BSG2_1(D) + CH(D, E, F) \
+			+ SPH_C32(0x78A5636F) + W09); \
+		T2 = SPH_T32(BSG2_0(H) + MAJ(H, A, B)); \
+		C = SPH_T32(C + T1); \
+		G = SPH_T32(T1 + T2); \
+		W10 = SPH_T32(SSG2_1(W08) + W03 + SSG2_0(W11) + W10); \
+		T1 = SPH_T32(F + BSG2_1(C) + CH(C, D, E) \
+			+ SPH_C32(0x84C87814) + W10); \
+		T2 = SPH_T32(BSG2_0(G) + MAJ(G, H, A)); \
+		B = SPH_T32(B + T1); \
+		F = SPH_T32(T1 + T2); \
+		W11 = SPH_T32(SSG2_1(W09) + W04 + SSG2_0(W12) + W11); \
+		T1 = SPH_T32(E + BSG2_1(B) + CH(B, C, D) \
+			+ SPH_C32(0x8CC70208) + W11); \
+		T2 = SPH_T32(BSG2_0(F) + MAJ(F, G, H)); \
+		A = SPH_T32(A + T1); \
+		E = SPH_T32(T1 + T2); \
+		W12 = SPH_T32(SSG2_1(W10) + W05 + SSG2_0(W13) + W12); \
+		T1 = SPH_T32(D + BSG2_1(A) + CH(A, B, C) \
+			+ SPH_C32(0x90BEFFFA) + W12); \
+		T2 = SPH_T32(BSG2_0(E) + MAJ(E, F, G)); \
+		H = SPH_T32(H + T1); \
+		D = SPH_T32(T1 + T2); \
+		W13 = SPH_T32(SSG2_1(W11) + W06 + SSG2_0(W14) + W13); \
+		T1 = SPH_T32(C + BSG2_1(H) + CH(H, A, B) \
+			+ SPH_C32(0xA4506CEB) + W13); \
+		T2 = SPH_T32(BSG2_0(D) + MAJ(D, E, F)); \
+		G = SPH_T32(G + T1); \
+		C = SPH_T32(T1 + T2); \
+		W14 = SPH_T32(SSG2_1(W12) + W07 + SSG2_0(W15) + W14); \
+		T1 = SPH_T32(B + BSG2_1(G) + CH(G, H, A) \
+			+ SPH_C32(0xBEF9A3F7) + W14); \
+		T2 = SPH_T32(BSG2_0(C) + MAJ(C, D, E)); \
+		F = SPH_T32(F + T1); \
+		B = SPH_T32(T1 + T2); \
+		W15 = SPH_T32(SSG2_1(W13) + W08 + SSG2_0(W00) + W15); \
+		T1 = SPH_T32(A + BSG2_1(F) + CH(F, G, H) \
+			+ SPH_C32(0xC67178F2) + W15); \
+		T2 = SPH_T32(BSG2_0(B) + MAJ(B, C, D)); \
+		E = SPH_T32(E + T1); \
+		A = SPH_T32(T1 + T2); \
+		(r)[0] = SPH_T32((r)[0] + A); \
+		(r)[1] = SPH_T32((r)[1] + B); \
+		(r)[2] = SPH_T32((r)[2] + C); \
+		(r)[3] = SPH_T32((r)[3] + D); \
+		(r)[4] = SPH_T32((r)[4] + E); \
+		(r)[5] = SPH_T32((r)[5] + F); \
+		(r)[6] = SPH_T32((r)[6] + G); \
+		(r)[7] = SPH_T32((r)[7] + H); \
+/* for (i=0;i<4;i++) {printf("r[%d]=%08x r[%d]=%08x\n",2*i,(r)[2*i],2*i+1,(r)[2*i+1]);}  */ \
+	} while (0)
 
-	S[18] = W[18];
-	S[19] = W[19];
-	S[20] = W[20];
-	S[22] = W[22];
-	S[23] = W[23];
-	S[24] = W[24];
-	S[30] = W[30];
-	S[31] = W[31];
-
-	W[18] += s0(W[3]);
-	W[19] += W[3];
-	W[20] += s1(W[18]);
-	W[21]  = s1(W[19]);
-	W[22] += s1(W[20]);
-	W[23] += s1(W[21]);
-	W[24] += s1(W[22]);
-	W[25]  = s1(W[23]) + W[18];
-	W[26]  = s1(W[24]) + W[19];
-	W[27]  = s1(W[25]) + W[20];
-	W[28]  = s1(W[26]) + W[21];
-	W[29]  = s1(W[27]) + W[22];
-	W[30] += s1(W[28]) + W[23];
-	W[31] += s1(W[29]) + W[24];
-	for (i = 32; i < 64; i += 2) {
-		W[i]   = s1(W[i - 2]) + W[i - 7] + s0(W[i - 15]) + W[i - 16];
-		W[i+1] = s1(W[i - 1]) + W[i - 6] + s0(W[i - 14]) + W[i - 15];
-	}
-
-	memcpy(S, prehash, 32);
-
-	RNDr(S, W,  3);
-	RNDr(S, W,  4);
-	RNDr(S, W,  5);
-	RNDr(S, W,  6);
-	RNDr(S, W,  7);
-	RNDr(S, W,  8);
-	RNDr(S, W,  9);
-	RNDr(S, W, 10);
-	RNDr(S, W, 11);
-	RNDr(S, W, 12);
-	RNDr(S, W, 13);
-	RNDr(S, W, 14);
-	RNDr(S, W, 15);
-	RNDr(S, W, 16);
-	RNDr(S, W, 17);
-	RNDr(S, W, 18);
-	RNDr(S, W, 19);
-	RNDr(S, W, 20);
-	RNDr(S, W, 21);
-	RNDr(S, W, 22);
-	RNDr(S, W, 23);
-	RNDr(S, W, 24);
-	RNDr(S, W, 25);
-	RNDr(S, W, 26);
-	RNDr(S, W, 27);
-	RNDr(S, W, 28);
-	RNDr(S, W, 29);
-	RNDr(S, W, 30);
-	RNDr(S, W, 31);
-	RNDr(S, W, 32);
-	RNDr(S, W, 33);
-	RNDr(S, W, 34);
-	RNDr(S, W, 35);
-	RNDr(S, W, 36);
-	RNDr(S, W, 37);
-	RNDr(S, W, 38);
-	RNDr(S, W, 39);
-	RNDr(S, W, 40);
-	RNDr(S, W, 41);
-	RNDr(S, W, 42);
-	RNDr(S, W, 43);
-	RNDr(S, W, 44);
-	RNDr(S, W, 45);
-	RNDr(S, W, 46);
-	RNDr(S, W, 47);
-	RNDr(S, W, 48);
-	RNDr(S, W, 49);
-	RNDr(S, W, 50);
-	RNDr(S, W, 51);
-	RNDr(S, W, 52);
-	RNDr(S, W, 53);
-	RNDr(S, W, 54);
-	RNDr(S, W, 55);
-	RNDr(S, W, 56);
-	RNDr(S, W, 57);
-	RNDr(S, W, 58);
-	RNDr(S, W, 59);
-	RNDr(S, W, 60);
-	RNDr(S, W, 61);
-	RNDr(S, W, 62);
-	RNDr(S, W, 63);
-
-	for (i = 0; i < 8; i++)
-		S[i] += midstate[i];
-	
-	W[18] = S[18];
-	W[19] = S[19];
-	W[20] = S[20];
-	W[22] = S[22];
-	W[23] = S[23];
-	W[24] = S[24];
-	W[30] = S[30];
-	W[31] = S[31];
-	
-	memcpy(S + 8, sha256d_hash1 + 8, 32);
-	S[16] = s1(sha256d_hash1[14]) + sha256d_hash1[ 9] + s0(S[ 1]) + S[ 0];
-	S[17] = s1(sha256d_hash1[15]) + sha256d_hash1[10] + s0(S[ 2]) + S[ 1];
-	S[18] = s1(S[16]) + sha256d_hash1[11] + s0(S[ 3]) + S[ 2];
-	S[19] = s1(S[17]) + sha256d_hash1[12] + s0(S[ 4]) + S[ 3];
-	S[20] = s1(S[18]) + sha256d_hash1[13] + s0(S[ 5]) + S[ 4];
-	S[21] = s1(S[19]) + sha256d_hash1[14] + s0(S[ 6]) + S[ 5];
-	S[22] = s1(S[20]) + sha256d_hash1[15] + s0(S[ 7]) + S[ 6];
-	S[23] = s1(S[21]) + S[16] + s0(sha256d_hash1[ 8]) + S[ 7];
-	S[24] = s1(S[22]) + S[17] + s0(sha256d_hash1[ 9]) + sha256d_hash1[ 8];
-	S[25] = s1(S[23]) + S[18] + s0(sha256d_hash1[10]) + sha256d_hash1[ 9];
-	S[26] = s1(S[24]) + S[19] + s0(sha256d_hash1[11]) + sha256d_hash1[10];
-	S[27] = s1(S[25]) + S[20] + s0(sha256d_hash1[12]) + sha256d_hash1[11];
-	S[28] = s1(S[26]) + S[21] + s0(sha256d_hash1[13]) + sha256d_hash1[12];
-	S[29] = s1(S[27]) + S[22] + s0(sha256d_hash1[14]) + sha256d_hash1[13];
-	S[30] = s1(S[28]) + S[23] + s0(sha256d_hash1[15]) + sha256d_hash1[14];
-	S[31] = s1(S[29]) + S[24] + s0(S[16])             + sha256d_hash1[15];
-	for (i = 32; i < 60; i += 2) {
-		S[i]   = s1(S[i - 2]) + S[i - 7] + s0(S[i - 15]) + S[i - 16];
-		S[i+1] = s1(S[i - 1]) + S[i - 6] + s0(S[i - 14]) + S[i - 15];
-	}
-	S[60] = s1(S[58]) + S[53] + s0(S[45]) + S[44];
-
-	sha256_init(hash);
-
-	RNDr(hash, S,  0);
-	RNDr(hash, S,  1);
-	RNDr(hash, S,  2);
-	RNDr(hash, S,  3);
-	RNDr(hash, S,  4);
-	RNDr(hash, S,  5);
-	RNDr(hash, S,  6);
-	RNDr(hash, S,  7);
-	RNDr(hash, S,  8);
-	RNDr(hash, S,  9);
-	RNDr(hash, S, 10);
-	RNDr(hash, S, 11);
-	RNDr(hash, S, 12);
-	RNDr(hash, S, 13);
-	RNDr(hash, S, 14);
-	RNDr(hash, S, 15);
-	RNDr(hash, S, 16);
-	RNDr(hash, S, 17);
-	RNDr(hash, S, 18);
-	RNDr(hash, S, 19);
-	RNDr(hash, S, 20);
-	RNDr(hash, S, 21);
-	RNDr(hash, S, 22);
-	RNDr(hash, S, 23);
-	RNDr(hash, S, 24);
-	RNDr(hash, S, 25);
-	RNDr(hash, S, 26);
-	RNDr(hash, S, 27);
-	RNDr(hash, S, 28);
-	RNDr(hash, S, 29);
-	RNDr(hash, S, 30);
-	RNDr(hash, S, 31);
-	RNDr(hash, S, 32);
-	RNDr(hash, S, 33);
-	RNDr(hash, S, 34);
-	RNDr(hash, S, 35);
-	RNDr(hash, S, 36);
-	RNDr(hash, S, 37);
-	RNDr(hash, S, 38);
-	RNDr(hash, S, 39);
-	RNDr(hash, S, 40);
-	RNDr(hash, S, 41);
-	RNDr(hash, S, 42);
-	RNDr(hash, S, 43);
-	RNDr(hash, S, 44);
-	RNDr(hash, S, 45);
-	RNDr(hash, S, 46);
-	RNDr(hash, S, 47);
-	RNDr(hash, S, 48);
-	RNDr(hash, S, 49);
-	RNDr(hash, S, 50);
-	RNDr(hash, S, 51);
-	RNDr(hash, S, 52);
-	RNDr(hash, S, 53);
-	RNDr(hash, S, 54);
-	RNDr(hash, S, 55);
-	RNDr(hash, S, 56);
-	
-	hash[2] += hash[6] + S1(hash[3]) + Ch(hash[3], hash[4], hash[5])
-	         + S[57] + sha256_k[57];
-	hash[1] += hash[5] + S1(hash[2]) + Ch(hash[2], hash[3], hash[4])
-	         + S[58] + sha256_k[58];
-	hash[0] += hash[4] + S1(hash[1]) + Ch(hash[1], hash[2], hash[3])
-	         + S[59] + sha256_k[59];
-	hash[7] += hash[3] + S1(hash[0]) + Ch(hash[0], hash[1], hash[2])
-	         + S[60] + sha256_k[60]
-	         + sha256_h[7];
-}
-
-#endif /* EXTERN_SHA256 */
-
-#if HAVE_SHA256_4WAY
-
-void sha256d_ms_4way(uint32_t *hash,  uint32_t *data,
-	const uint32_t *midstate, const uint32_t *prehash);
-
-static inline int scanhash_sha256d_4way(int thr_id, uint32_t *pdata,
-	const uint32_t *ptarget, uint32_t max_nonce, unsigned long *hashes_done)
-{
-	uint32_t data[4 * 64] __attribute__((aligned(128)));
-	uint32_t hash[4 * 8] __attribute__((aligned(32)));
-	uint32_t midstate[4 * 8] __attribute__((aligned(32)));
-	uint32_t prehash[4 * 8] __attribute__((aligned(32)));
-	uint32_t n = pdata[19] - 1;
-	const uint32_t first_nonce = pdata[19];
-	const uint32_t Htarg = ptarget[7];
-	int i, j;
-	
-	memcpy(data, pdata + 16, 64);
-	sha256d_preextend(data);
-	for (i = 31; i >= 0; i--)
-		for (j = 0; j < 4; j++)
-			data[i * 4 + j] = data[i];
-	
-	sha256_init(midstate);
-	sha256_transform(midstate, pdata, 0);
-	memcpy(prehash, midstate, 32);
-	sha256d_prehash(prehash, pdata + 16);
-	for (i = 7; i >= 0; i--) {
-		for (j = 0; j < 4; j++) {
-			midstate[i * 4 + j] = midstate[i];
-			prehash[i * 4 + j] = prehash[i];
-		}
-	}
-	
-	do {
-		for (i = 0; i < 4; i++)
-			data[4 * 3 + i] = ++n;
-		
-		sha256d_ms_4way(hash, data, midstate, prehash);
-		
-		for (i = 0; i < 4; i++) {
-			if (swab32(hash[4 * 7 + i]) <= Htarg) {
-				pdata[19] = data[4 * 3 + i];
-				sha256d_80_swap(hash, pdata);
-				if (fulltest(hash, ptarget)) {
-					*hashes_done = n - first_nonce + 1;
-					return 1;
-				}
-			}
-		}
-	} while (n < max_nonce && !work_restart[thr_id].restart);
-	
-	*hashes_done = n - first_nonce + 1;
-	pdata[19] = n;
-	return 0;
-}
-
-#endif /* HAVE_SHA256_4WAY */
-
-#if HAVE_SHA256_8WAY
-
-void sha256d_ms_8way(uint32_t *hash,  uint32_t *data,
-	const uint32_t *midstate, const uint32_t *prehash);
-
-static inline int scanhash_sha256d_8way(int thr_id, uint32_t *pdata,
-	const uint32_t *ptarget, uint32_t max_nonce, unsigned long *hashes_done)
-{
-	uint32_t data[8 * 64] __attribute__((aligned(128)));
-	uint32_t hash[8 * 8] __attribute__((aligned(32)));
-	uint32_t midstate[8 * 8] __attribute__((aligned(32)));
-	uint32_t prehash[8 * 8] __attribute__((aligned(32)));
-	uint32_t n = pdata[19] - 1;
-	const uint32_t first_nonce = pdata[19];
-	const uint32_t Htarg = ptarget[7];
-	int i, j;
-	
-	memcpy(data, pdata + 16, 64);
-	sha256d_preextend(data);
-	for (i = 31; i >= 0; i--)
-		for (j = 0; j < 8; j++)
-			data[i * 8 + j] = data[i];
-	
-	sha256_init(midstate);
-	sha256_transform(midstate, pdata, 0);
-	memcpy(prehash, midstate, 32);
-	sha256d_prehash(prehash, pdata + 16);
-	for (i = 7; i >= 0; i--) {
-		for (j = 0; j < 8; j++) {
-			midstate[i * 8 + j] = midstate[i];
-			prehash[i * 8 + j] = prehash[i];
-		}
-	}
-	
-	do {
-		for (i = 0; i < 8; i++)
-			data[8 * 3 + i] = ++n;
-		
-		sha256d_ms_8way(hash, data, midstate, prehash);
-		
-		for (i = 0; i < 8; i++) {
-			if (swab32(hash[8 * 7 + i]) <= Htarg) {
-				pdata[19] = data[8 * 3 + i];
-				sha256d_80_swap(hash, pdata);
-				if (fulltest(hash, ptarget)) {
-					*hashes_done = n - first_nonce + 1;
-					return 1;
-				}
-			}
-		}
-	} while (n < max_nonce && !work_restart[thr_id].restart);
-	
-	*hashes_done = n - first_nonce + 1;
-	pdata[19] = n;
-	return 0;
-}
-
-#endif /* HAVE_SHA256_8WAY */
-
-int scanhash_sha256d(int thr_id, uint32_t *pdata, const uint32_t *ptarget,
-	uint32_t max_nonce, unsigned long *hashes_done)
-{
-	uint32_t data[64] /* __attribute__((aligned(128))) */;
-	uint32_t hash[8] /* __attribute__((aligned(32))) */;
-	uint32_t midstate[8] /* __attribute__((aligned(32))) */;
-	uint32_t prehash[8] /* __attribute__((aligned(32))) */;
-	uint32_t n = pdata[19] - 1;
-	const uint32_t first_nonce = pdata[19];
-	const uint32_t Htarg = ptarget[7];
-	
-#if HAVE_SHA256_8WAY
-	if (sha256_use_8way())
-		return scanhash_sha256d_8way(thr_id, pdata, ptarget,
-			max_nonce, hashes_done);
 #endif
-#if HAVE_SHA256_4WAY
-	if (sha256_use_4way())
-		return scanhash_sha256d_4way(thr_id, pdata, ptarget,
-			max_nonce, hashes_done);
+
+/*
+ * One round of SHA-224 / SHA-256. The data must be aligned for 32-bit access.
+ */
+static void
+sha2_round(const unsigned char *data, sph_u32 r[8])
+{
+#define SHA2_IN(x)   sph_dec32be_aligned(data + (4 * (x)))
+	SHA2_ROUND_BODY(SHA2_IN, r);
+#undef SHA2_IN
+}
+
+/* see sph_sha2.h */
+void
+sph_sha224_init(void *cc)
+{
+	sph_sha224_context *sc;
+
+	sc = cc;
+	memcpy(sc->val, H224, sizeof H224);
+#if SPH_64
+	sc->count = 0;
+#else
+	sc->count_high = sc->count_low = 0;
 #endif
-	
-	memcpy(data, pdata + 16, 64);
-	sha256d_preextend(data);
-	
-	sha256_init(midstate);
-	sha256_transform(midstate, pdata, 0);
-	memcpy(prehash, midstate, 32);
-	sha256d_prehash(prehash, pdata + 16);
-	
-	do {
-		data[3] = ++n;
-		sha256d_ms(hash, data, midstate, prehash);
-		if (swab32(hash[7]) <= Htarg) {
-			pdata[19] = data[3];
-			sha256d_80_swap(hash, pdata);
-			if (fulltest(hash, ptarget)) {
-				*hashes_done = n - first_nonce + 1;
-				return 1;
-			}
-		}
-	} while (n < max_nonce && !work_restart[thr_id].restart);
-	
-	*hashes_done = n - first_nonce + 1;
-	pdata[19] = n;
-	return 0;
+}
+
+/* see sph_sha2.h */
+void
+sph_sha256_init(void *cc)
+{
+	sph_sha256_context *sc;
+
+	sc = cc;
+	memcpy(sc->val, H256, sizeof H256);
+#if SPH_64
+	sc->count = 0;
+#else
+	sc->count_high = sc->count_low = 0;
+#endif
+}
+
+#define RFUN   sha2_round
+#define HASH   sha224
+#define BE32   1
+#include "md_helper.c"
+
+/* see sph_sha2.h */
+void
+sph_sha224_close(void *cc, void *dst)
+{
+	sha224_close(cc, dst, 7);
+	sph_sha224_init(cc);
+}
+
+/* see sph_sha2.h */
+void
+sph_sha224_addbits_and_close(void *cc, unsigned ub, unsigned n, void *dst)
+{
+	sha224_addbits_and_close(cc, ub, n, dst, 7);
+	sph_sha224_init(cc);
+}
+
+/* see sph_sha2.h */
+void
+sph_sha256_close(void *cc, void *dst)
+{
+	sha224_close(cc, dst, 8);
+	sph_sha256_init(cc);
+}
+
+/* see sph_sha2.h */
+void
+sph_sha256_addbits_and_close(void *cc, unsigned ub, unsigned n, void *dst)
+{
+	sha224_addbits_and_close(cc, ub, n, dst, 8);
+	sph_sha256_init(cc);
+}
+
+/* see sph_sha2.h */
+void
+sph_sha224_comp(const sph_u32 msg[16], sph_u32 val[8])
+{
+#define SHA2_IN(x)   msg[x]
+	SHA2_ROUND_BODY(SHA2_IN, val);
+#undef SHA2_IN
 }

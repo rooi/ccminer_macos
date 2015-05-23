@@ -87,6 +87,7 @@ enum sha_algos {
 	ALGO_ANIME,
 	ALGO_BLAKE,
 	ALGO_BLAKECOIN,
+	ALGO_CREDITS,
 	ALGO_DEEP,
 	ALGO_DMD_GR,
 	ALGO_FRESH,
@@ -122,6 +123,7 @@ static const char *algo_names[] = {
 	"anime",
 	"blake",
 	"blakecoin",
+	"credits",
 	"deep",
 	"dmd-gr",
 	"fresh",
@@ -275,6 +277,7 @@ Options:\n\
 			anime       Animecoin\n\
 			blake       Blake 256 (SFR)\n\
 			blakecoin   Fast Blake 256 (8 rounds)\n\
+			credits     Credits (CRE) SHA256-168\n\
 			deep        Deepcoin\n\
 			dmd-gr      Diamond-Groestl\n\
 			fresh       Freshcoin (shavite 80)\n\
@@ -628,13 +631,28 @@ static void calc_network_diff(struct work *work)
 
 static bool work_decode(const json_t *val, struct work *work)
 {
-	int data_size = sizeof(work->data), target_size = sizeof(work->target);
-	int adata_sz = ARRAY_SIZE(work->data), atarget_sz = ARRAY_SIZE(work->target);
+	int data_size = 128, target_size = sizeof(work->target);
+	int adata_sz, atarget_sz = ARRAY_SIZE(work->target);
+	int midstate_sz = 0;
 	int i;
 
-	if (opt_algo == ALGO_NEOSCRYPT || opt_algo == ALGO_ZR5) {
-		data_size = 80; adata_sz = 20;
+	switch (opt_algo) {
+	case ALGO_NEOSCRYPT:
+		data_size = 84;
+		break;
+	case ALGO_ZR5:
+		data_size = 80;
+		break;
+	case ALGO_BITCOIN:
+		/* note: getwork is no more supported in BTC wallet */
+		midstate_sz = 32;
+		break;
+	case ALGO_CREDITS:
+		data_size = 168;
+		midstate_sz = 32;
+		break;
 	}
+	adata_sz = data_size / sizeof(uint32_t);
 
 	if (unlikely(!jobj_binary(val, "data", work->data, data_size))) {
 		applog(LOG_ERR, "JSON inval data");
@@ -643,6 +661,14 @@ static bool work_decode(const json_t *val, struct work *work)
 	if (unlikely(!jobj_binary(val, "target", work->target, target_size))) {
 		applog(LOG_ERR, "JSON inval target");
 		return false;
+	}
+	if (midstate_sz) {
+		if (unlikely(!jobj_binary(val, "midstate", work->midstate, midstate_sz))) {
+			applog(LOG_ERR, "JSON inval midstate");
+			return false;
+		}
+		for (i = 0; i < midstate_sz/4 /*sizeof(uint32_t)*/; i++)
+			work->midstate[i] = le32dec(work->midstate + i);
 	}
 
 	if (opt_algo == ALGO_HEAVY) {
@@ -886,15 +912,21 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 
 	} else {
 
-		int data_size = sizeof(work->data);
-		int adata_sz = ARRAY_SIZE(work->data);
+		int data_size = 128, adata_sz;
+
+		switch (opt_algo) {
+		case ALGO_NEOSCRYPT:
+		case ALGO_ZR5:
+			data_size = 80;
+			break;
+		case ALGO_CREDITS:
+			data_size = 168;
+			break;
+		}
+		adata_sz = data_size / sizeof(uint32_t);
 
 		/* build hex string */
 		char *str = NULL;
-
-		if (opt_algo == ALGO_ZR5) {
-			data_size = 80; adata_sz = 20;
-		}
 
 		if (opt_algo != ALGO_HEAVY && opt_algo != ALGO_MJOLLNIR) {
 			for (int i = 0; i < adata_sz; i++)
@@ -1393,6 +1425,7 @@ static bool stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
 		break;
 	}
 
+	// to check...
 	work->data[20] = 0x80000000;
 	work->data[31] = (opt_algo == ALGO_MJOLLNIR) ? 0x000002A0 : 0x00000280;
 
@@ -1424,6 +1457,7 @@ static bool stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
 		diff_factor = 1.;
 
 	switch (opt_algo) {
+		case ALGO_CREDITS:
 		case ALGO_JACKPOT:
 		case ALGO_NEOSCRYPT:
 		case ALGO_PLUCK:
@@ -1504,6 +1538,7 @@ static void *miner_thread(void *userdata)
 	struct work work;
 	uint32_t max_nonce;
 	uint32_t end_nonce = UINT32_MAX / opt_n_threads * (thr_id + 1) - (thr_id + 1);
+	uint64_t loopcnt = 0;
 	bool work_done = false;
 	bool extrajob = false;
 	char s[16];
@@ -1566,7 +1601,7 @@ static void *miner_thread(void *userdata)
 		uint64_t max64, minmax = 0x100000;
 
 		// &work.data[19]
-		int wcmplen = 76;
+		int wcmplen = opt_algo == ALGO_CREDITS ? 140 : 76;
 		int wcmpoft = 0;
 		uint32_t *nonceptr = (uint32_t*) (((char*)work.data) + wcmplen);
 
@@ -1869,6 +1904,11 @@ static void *miner_thread(void *userdata)
 			                      max_nonce, &hashes_done, 14);
 			break;
 
+		case ALGO_CREDITS:
+			rc = scanhash_credits(thr_id, work.data, work.target,
+			                      work.midstate, max_nonce, &hashes_done);
+			break;
+
 		case ALGO_FRESH:
 			rc = scanhash_fresh(thr_id, work.data, work.target,
 			                      max_nonce, &hashes_done);
@@ -2014,7 +2054,13 @@ static void *miner_thread(void *userdata)
 			hashlog_remember_scan_range(&work);
 
 		/* output */
-		if (!opt_quiet && firstwork_time) {
+		bool display_hashrate = (loopcnt > 0);
+		if (opt_algo == ALGO_CREDITS) {
+			display_hashrate = loopcnt > 800 && !(loopcnt % 400);
+		}
+		loopcnt++;
+
+		if (!opt_quiet && display_hashrate) {
 			format_hashrate(thr_hashrates[thr_id], s);
 			applog(LOG_INFO, "GPU #%d: %s, %s",
 				device_map[thr_id], device_name[device_map[thr_id]], s);
@@ -2422,10 +2468,14 @@ void parse_arg(int key, char *arg)
 		}
 		if (i == ARRAY_SIZE(algo_names)) {
 			// some aliases...
-			if (!strcasecmp("diamond", arg))
+			if (!strcasecmp("credit", arg))
+				i = opt_algo = ALGO_CREDITS;
+			else if (!strcasecmp("diamond", arg))
 				i = opt_algo = ALGO_DMD_GR;
-			if (!strcasecmp("doom", arg))
+			else if (!strcasecmp("doom", arg))
 				i = opt_algo = ALGO_LUFFA;
+			else if (!strcasecmp("sha256d", arg))
+				i = opt_algo = ALGO_BITCOIN;
 			else if (!strcasecmp("ziftr", arg))
 				i = opt_algo = ALGO_ZR5;
 			else

@@ -1795,7 +1795,7 @@ void print_hash_tests(void)
 	uchar *scratchbuf = NULL;
 	char s[128] = {'\0'};
 	uchar hash[128];
-	uchar buf[128];
+	uchar buf[168];
 
 	// work space for scratchpad based algos
 	scratchbuf = (uchar*)calloc(128, 1024);
@@ -1813,6 +1813,9 @@ void print_hash_tests(void)
 
 	blake256hash(&hash[0], &buf[0], 14);
 	printpfx("blake", hash);
+
+	creditshash(&hash[0], &buf[0]);
+	printpfx("credits", hash);
 
 	deephash(&hash[0], &buf[0]);
 	printpfx("deep", hash);

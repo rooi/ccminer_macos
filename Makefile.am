@@ -44,9 +44,10 @@ ccminer_SOURCES	= elist.h miner.h compat.h \
 			  neoscrypt/neoscrypt.cpp neoscrypt/neoscrypt-cpu.c neoscrypt/cuda_neoscrypt.cu \
 			  cuda_nist5.cu pentablake.cu skein.cu cuda_skeincoin.cu skein2.cpp zr5.cu \
 			  sph/bmw.c sph/blake.c sph/groestl.c sph/jh.c sph/keccak.c sph/skein.c \
-			  sph/cubehash.c sph/echo.c sph/luffa.c sph/sha2.c sph/shavite.c sph/simd.c \
+			  sph/cubehash.c sph/echo.c sph/luffa.c sph/sha2.c sph/sha256d.c sph/shavite.c sph/simd.c \
 			  sph/hamsi.c sph/hamsi_helper.c sph/sph_hamsi.h \
 			  sph/shabal.c sph/whirlpool.c sph/sha2big.c sph/haval.c \
+			  sha256/credits.cu sha256/cuda_credits.cu \
 			  pluck/pluck.cu pluck/cuda_pluck.cu \
 			  qubit/qubit.cu qubit/qubit_luffa512.cu qubit/deep.cu qubit/luffa.cu \
 			  x11/x11.cu x11/fresh.cu x11/cuda_x11_luffa512.cu x11/cuda_x11_cubehash512.cu \

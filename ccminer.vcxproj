@@ -269,6 +269,7 @@
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="sph\sha2.c" />
+    <ClCompile Include="sph\sha256d.c" />
     <ClCompile Include="sph\sha2big.c" />
     <ClCompile Include="sph\shabal.c" />
     <ClCompile Include="sph\shavite.c" />
@@ -335,8 +336,9 @@
     <CudaCompile Include="cuda.cpp" />
     <CudaCompile Include="cuda_groestlcoin.cu" />
     <CudaCompile Include="cuda_myriadgroestl.cu" />
-    <CudaCompile Include="cuda_nist5.cu">
-    </CudaCompile>
+    <CudaCompile Include="cuda_nist5.cu" />
+    <CudaCompile Include="sha256\credits.cu" />
+    <CudaCompile Include="sha256\cuda_credits.cu" />
     <CudaCompile Include="scrypt\blake.cu" />
     <CudaCompile Include="scrypt\keccak.cu" />
     <CudaCompile Include="scrypt\sha256.cu" />

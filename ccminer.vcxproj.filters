@@ -180,6 +180,9 @@
     <ClCompile Include="sph\haval_helper.c">
       <Filter>Source Files\sph</Filter>
     </ClCompile>
+    <ClCompile Include="sph\sha256d.c">
+      <Filter>Source Files\sph</Filter>
+    </ClCompile>
     <ClCompile Include="sph\sha2big.c">
       <Filter>Source Files\sph</Filter>
     </ClCompile>
