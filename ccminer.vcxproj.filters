@@ -79,6 +79,9 @@
     <Filter Include="Source Files\neoscrypt">
       <UniqueIdentifier>{2037fd0d-e7a2-4da8-956c-150aec726a99}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\CUDA\sha256">
+      <UniqueIdentifier>{6def248f-bf21-43b0-8fd7-f2c749b73e9e}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="compat\jansson\dump.c">
@@ -642,6 +645,18 @@
     </CudaCompile>
     <CudaCompile Include="neoscrypt\cuda_neoscrypt.cu">
       <Filter>Source Files\neoscrypt</Filter>
+    </CudaCompile>
+    <CudaCompile Include="sha256\bitcoin.cu">
+      <Filter>Source Files\CUDA\sha256</Filter>
+    </CudaCompile>
+    <CudaCompile Include="sha256\cuda_bitcoin.cu">
+      <Filter>Source Files\CUDA\sha256</Filter>
+    </CudaCompile>
+    <CudaCompile Include="sha256\credits.cu">
+      <Filter>Source Files\CUDA\sha256</Filter>
+    </CudaCompile>
+    <CudaCompile Include="sha256\cuda_credits.cu">
+      <Filter>Source Files\CUDA\sha256</Filter>
     </CudaCompile>
   </ItemGroup>
   <ItemGroup>

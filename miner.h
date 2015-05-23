@@ -303,6 +303,9 @@ extern int scanhash_anime(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
 	unsigned long *hashes_done);
 
+extern int scanhash_bitcoin(int thr_id, uint32_t *pdata,
+	uint32_t *ptarget, uint32_t max_nonce, unsigned long *hashes_done);
+
 extern int scanhash_blake256(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
 	unsigned long *hashes_done, int8_t blakerounds);
@@ -771,6 +774,7 @@ void applog_compare_hash(unsigned char *hash, unsigned char *hash2);
 
 void print_hash_tests(void);
 void animehash(void *state, const void *input);
+void bitcoin_hash(uint32_t *output, const uint32_t *data, uint32_t nonce, const uint32_t *midstate);
 void blake256hash(void *output, const void *input, int8_t rounds);
 void creditshash(void *state, const void *input);
 void deephash(void *state, const void *input);

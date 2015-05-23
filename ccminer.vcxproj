@@ -337,6 +337,8 @@
     <CudaCompile Include="cuda_groestlcoin.cu" />
     <CudaCompile Include="cuda_myriadgroestl.cu" />
     <CudaCompile Include="cuda_nist5.cu" />
+    <CudaCompile Include="sha256\bitcoin.cu" />
+    <CudaCompile Include="sha256\cuda_bitcoin.cu" />
     <CudaCompile Include="sha256\credits.cu" />
     <CudaCompile Include="sha256\cuda_credits.cu" />
     <CudaCompile Include="scrypt\blake.cu" />

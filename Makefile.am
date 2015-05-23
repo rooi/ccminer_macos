@@ -47,6 +47,7 @@ ccminer_SOURCES	= elist.h miner.h compat.h \
 			  sph/cubehash.c sph/echo.c sph/luffa.c sph/sha2.c sph/sha256d.c sph/shavite.c sph/simd.c \
 			  sph/hamsi.c sph/hamsi_helper.c sph/sph_hamsi.h \
 			  sph/shabal.c sph/whirlpool.c sph/sha2big.c sph/haval.c \
+			  sha256/bitcoin.cu sha256/cuda_bitcoin.cu \
 			  sha256/credits.cu sha256/cuda_credits.cu \
 			  pluck/pluck.cu pluck/cuda_pluck.cu \
 			  qubit/qubit.cu qubit/qubit_luffa512.cu qubit/deep.cu qubit/luffa.cu \
