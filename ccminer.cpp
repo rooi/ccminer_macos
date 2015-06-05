@@ -1455,7 +1455,7 @@ static bool wanna_mine(int thr_id)
 		int next = pool_get_first_valid(cur_pooln+1);
 		if (num_pools > 1 && pools[next].max_diff != pools[cur_pooln].max_diff)
 			conditional_pool_rotate = allow_pool_rotate;
-		if (!conditional_state[thr_id] && !opt_quiet && !thr_id)
+		if (!thr_id && !conditional_state[thr_id] && !opt_quiet)
 			applog(LOG_INFO, "network diff too high, waiting...");
 		state = false;
 	}
@@ -1463,7 +1463,7 @@ static bool wanna_mine(int thr_id)
 		int next = pool_get_first_valid(cur_pooln+1);
 		if (pools[next].max_rate != pools[cur_pooln].max_rate)
 			conditional_pool_rotate = allow_pool_rotate;
-		if (!conditional_state[thr_id] && !opt_quiet && !thr_id) {
+		if (!thr_id && !conditional_state[thr_id] && !opt_quiet) {
 			char rate[32];
 			format_hashrate(opt_max_rate, rate);
 			applog(LOG_INFO, "network hashrate too high, waiting %s...", rate);
@@ -1629,6 +1629,13 @@ static void *miner_thread(void *userdata)
 		work_restart[thr_id].restart = 0;
 		pthread_mutex_unlock(&g_work_lock);
 
+		/* prevent gpu scans before a job is received */
+		if (have_stratum && work.data[0] == 0 && !opt_benchmark) {
+			sleep(1);
+			if (!thr_id) pools[cur_pooln].wait_time += 1;
+			continue;
+		}
+
 		/* conditional mining */
 		if (!wanna_mine(thr_id)) {
 
@@ -1638,21 +1645,16 @@ static void *miner_thread(void *userdata)
 					pool_switch_next();
 				else if (time(NULL) - firstwork_time > 35) {
 					if (!opt_quiet)
-						applog(LOG_WARNING, "Pool switching timed out (1)...");
-					pools[cur_pooln].wait_time += 1;
+						applog(LOG_WARNING, "Pool switching timed out...");
+					if (!thr_id) pools[cur_pooln].wait_time += 1;
 					pool_is_switching = false;
 				}
 				sleep(1);
 				continue;
 			}
 
-			sleep(5); pools[cur_pooln].wait_time += 5;
-			continue;
-		}
-
-		/* prevent gpu scans before a job is received */
-		if (have_stratum && work.data[0] == 0) {
-			sleep(1); pools[cur_pooln].wait_time += 1;
+			sleep(5);
+			if (!thr_id) pools[cur_pooln].wait_time += 5;
 			continue;
 		}
 
@@ -1667,6 +1669,10 @@ static void *miner_thread(void *userdata)
 			int passed = (int)(time(NULL) - firstwork_time);
 			int remain = (int)(opt_time_limit - passed);
 			if (remain < 0)  {
+				if (thr_id != 0) {
+					sleep(1);
+					continue;
+				}
 				if (num_pools > 1 && pools[cur_pooln].time_limit > 0) {
 					if (!pool_is_switching) {
 						if (!opt_quiet)
@@ -1675,7 +1681,7 @@ static void *miner_thread(void *userdata)
 					} else if (passed > 35) {
 						// ensure we dont stay locked if pool_is_switching is not reset...
 						applog(LOG_WARNING, "Pool switch to %d timed out...", cur_pooln);
-						pools[cur_pooln].wait_time += 1;
+						if (!thr_id) pools[cur_pooln].wait_time += 1;
 						pool_is_switching = false;
 					}
 					sleep(1);
@@ -1686,7 +1692,7 @@ static void *miner_thread(void *userdata)
 				if (opt_benchmark) {
 					char rate[32];
 					format_hashrate((double)global_hashrate, rate);
-	                                applog(LOG_NOTICE, "Benchmark: %s", rate);
+					applog(LOG_NOTICE, "Benchmark: %s", rate);
 					usleep(200*1000);
 					fprintf(stderr, "%llu\n", (long long unsigned int) global_hashrate);
 				} else {
