@@ -110,6 +110,7 @@ enum sha_algos {
 	ALGO_SCRYPT_JANE,
 	ALGO_SKEIN,
 	ALGO_SKEIN2,
+	ALGO_SPREAD,
 	ALGO_S3,
 	ALGO_X11,
 	ALGO_X13,
@@ -148,6 +149,7 @@ static const char *algo_names[] = {
 	"scrypt-jane",
 	"skein",
 	"skein2",
+	"spread",
 	"s3",
 	"x11",
 	"x13",
@@ -158,6 +160,8 @@ static const char *algo_names[] = {
 	"zr5",
 	""
 };
+
+#include "spreadx11/spreadx11.h"
 
 bool opt_debug = false;
 bool opt_debug_diff = false;
@@ -309,6 +313,7 @@ Options:\n\
 			scrypt-jane Scrypt-jane Chacha\n\
 			skein       Skein SHA2 (Skeincoin)\n\
 			skein2      Double Skein (Woodcoin)\n\
+			spread      SpreadCoin\n\
 			s3          S3 (1Coin)\n\
 			x11         X11 (DarkCoin)\n\
 			x13         X13 (MaruCoin)\n\
@@ -634,25 +639,26 @@ static bool work_decode(const json_t *val, struct work *work)
 	case ALGO_NEOSCRYPT:
 		data_size = 84; // typo in FTC wallet ? and clones..
 		break;
+	case ALGO_SPREAD:
+		data_size = 185;
+		break;
 	default:
 		data_size = 128; // sizeof(work->data);
 	}
 
 	adata_sz = data_size / 4; // sizeof(uint32_t);
 
-	if (unlikely(!jobj_binary(val, "data", work->data, data_size))) {
-		applog(LOG_ERR, "JSON inval data");
+	if (opt_algo != ALGO_SPREAD && !jobj_binary(val, "data", work->data, data_size)) {
+		applog(LOG_ERR, "JSON invalid data");
 		return false;
 	}
 	if (unlikely(!jobj_binary(val, "target", work->target, target_size))) {
-		applog(LOG_ERR, "JSON inval target");
+		applog(LOG_ERR, "JSON invalid target");
 		return false;
 	}
 
-	if (opt_algo == ALGO_HEAVY) {
-		if (unlikely(!jobj_binary(val, "maxvote", &work->maxvote, sizeof(work->maxvote)))) {
-			work->maxvote = 2048;
-		}
+	if (opt_algo == ALGO_HEAVY && !jobj_binary(val, "maxvote", &work->maxvote, sizeof(work->maxvote))) {
+		work->maxvote = 2048;
 	} else work->maxvote = 0;
 
 	for (i = 0; i < adata_sz; i++)
@@ -697,6 +703,35 @@ static bool work_decode(const json_t *val, struct work *work)
 				applog(LOG_DEBUG, "block txs: %u, total len: %u", work->tx_count, totlen);
 		}
 	}
+
+	if (opt_algo == ALGO_SPREAD) {
+		int len;
+		struct spreadwork* swork = (struct spreadwork*) work->extradata;
+
+		if(!swork) {
+			applog(LOG_ERR, "SpreadCoin custom data not allocated!");
+			return false;
+		}
+		if( (len = jobj_binary(val, "data", swork->data, sizeof(swork->data))) == -1 ) {
+			applog(LOG_ERR, "JSON invalid data");
+			return false;
+		}
+		if( (len = jobj_binary(val, "pmr", swork->privkey, sizeof(swork->privkey))) == -1 ) {
+			applog(LOG_ERR, "JSON invalid privkey");
+			return false;
+		}
+		if( (len = jobj_binary(val, "kinv", swork->kinv, sizeof(swork->kinv))) == -1 ) {
+			applog(LOG_ERR, "JSON invalid kinv");
+			return false;
+		}
+		if( (len = jobj_binary(val, "tx", swork->tx, sizeof(swork->tx))) == -1 ) {
+			applog(LOG_ERR, "JSON invalid tx");
+			return false;
+		}
+		swork->txsize = len; // todo tx_count ?
+		if (len)
+			applog(LOG_DEBUG, "spreak block len=%d", len);
+    }
 
 	json_t *jr = json_object_get(val, "noncerange");
 	if (jr) {
@@ -779,7 +814,6 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 	struct pool_infos *pool = &pools[work->pooln];
 	json_t *val, *res, *reason;
 	bool stale_work = false;
-	char s[384];
 
 	/* discard if a newer block was received */
 	stale_work = work->height && work->height < g_work.height;
@@ -812,6 +846,7 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 	}
 
 	if (pool->type & POOL_STRATUM) {
+		char s[384];
 		uint32_t sent = 0;
 		uint32_t ntime, nonce;
 		uint16_t nvote;
@@ -889,33 +924,57 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 
 	} else {
 
+		uchar* data = (uchar*)work->data;
 		int data_size = sizeof(work->data);
 		int adata_sz = ARRAY_SIZE(work->data);
+		char *json = NULL, *hex = NULL;
 
-		/* build hex string */
-		char *str = NULL;
-
-		if (opt_algo == ALGO_ZR5) {
+		switch (opt_algo) {
+		case ALGO_ZR5:
 			data_size = 80; adata_sz = 20;
+			break;
+		case ALGO_SPREAD:
+			{
+				struct spreadwork* swork = (struct spreadwork*) work->extradata;
+				if (!swork) {
+					applog(LOG_ERR, "submit_upstream_work spread OOM");
+					return false;
+				}
+				data = (uchar*) swork->data;
+				data_size = sizeof(swork->data); // 185
+				adata_sz = 0; // no endian encode
+			}
+			break;
+		case ALGO_HEAVY:
+		case ALGO_MJOLLNIR:
+			adata_sz = 0; // no endian encode
+			break;
+		default:
+			break;
 		}
 
-		if (opt_algo != ALGO_HEAVY && opt_algo != ALGO_MJOLLNIR) {
-			for (int i = 0; i < adata_sz; i++)
-				le32enc(work->data + i, work->data[i]);
+		for (int i = 0; i < adata_sz; i++)
+			le32enc(&work->data[i], work->data[i]);
+
+		hex = bin2hex(data, data_size);
+		if (unlikely(!hex)) {
+			applog(LOG_ERR, "submit_upstream_work OOM");
+			return false;
 		}
-		str = bin2hex((uchar*)work->data, data_size);
-		if (unlikely(!str)) {
+
+		json = (char*) malloc(strlen(hex) + 64);
+		if (unlikely(!json)) {
 			applog(LOG_ERR, "submit_upstream_work OOM");
 			return false;
 		}
 
 		/* build JSON-RPC request */
-		sprintf(s,
+		sprintf(json,
 			"{\"method\": \"getwork\", \"params\": [\"%s\"], \"id\":4}\r\n",
-			str);
+			hex);
 
 		/* issue JSON-RPC request */
-		val = json_rpc_call_pool(curl, pool, s, false, false, NULL);
+		val = json_rpc_call_pool(curl, pool, json, false, false, NULL);
 		if (unlikely(!val)) {
 			applog(LOG_ERR, "submit_upstream_work json_rpc_call failed");
 			return false;
@@ -932,7 +991,8 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 
 		json_decref(val);
 
-		free(str);
+		free(hex);
+		free(json);
 	}
 
 	return true;
@@ -1148,6 +1208,11 @@ static bool workio_get_work(struct workio_cmd *wc, CURL *curl)
 	if (!ret_work)
 		return false;
 
+	if (opt_algo == ALGO_SPREAD) {
+		ret_work->extradata = calloc(1, sizeof(struct spreadwork));
+		//applog(LOG_DEBUG, "spread work alloc %p", ret_work->extradata);
+	}
+
 	/* assign pool number before rpc calls */
 	ret_work->pooln = wc->pooln;
 	// applog(LOG_DEBUG, "%s: pool %d", __func__, wc->pooln);
@@ -1175,8 +1240,9 @@ static bool workio_get_work(struct workio_cmd *wc, CURL *curl)
 	}
 
 	/* send work to requesting thread */
-	if (!tq_push(wc->thr->q, ret_work))
+	if (!tq_push(wc->thr->q, ret_work)) {
 		aligned_free(ret_work);
+	}
 
 	return true;
 }
@@ -1272,6 +1338,11 @@ bool get_work(struct thr_info *thr, struct work *work)
 		work->data[20] = 0x80000000;
 		work->data[31] = 0x00000280;
 		memset(work->target, 0x00, sizeof(work->target));
+		if (opt_algo == ALGO_SPREAD) {
+			work->extradata = calloc(1, sizeof(struct spreadwork)); // todo: free in benchmark
+			struct spreadwork *swork = (struct spreadwork *) work->extradata;
+			memcpy(swork->data, work->data, 128);
+		}
 		return true;
 	}
 
@@ -1294,6 +1365,13 @@ bool get_work(struct thr_info *thr, struct work *work)
 	work_heap = (struct work *)tq_pop(thr->q, NULL);
 	if (!work_heap)
 		return false;
+
+	/* if allocated in previous work */
+	if (opt_algo == ALGO_SPREAD && work->extradata) {
+		//applog(LOG_DEBUG, "spread work free %p", work->extradata);
+		if (work_heap->extradata != work->extradata)
+			free(work->extradata);
+	}
 
 	/* copy returned work into storage provided by caller */
 	memcpy(work, work_heap, sizeof(*work));
@@ -1529,6 +1607,7 @@ void miner_free_device(int thr_id)
 	free_qubit(thr_id);
 	free_skeincoin(thr_id);
 	free_skein2(thr_id);
+	free_spreadx11(thr_id);
 	free_s3(thr_id);
 	free_whirlx(thr_id);
 	free_x11(thr_id);
@@ -1665,10 +1744,30 @@ static void *miner_thread(void *userdata)
 				uint64_t target64 = g_work.target[7] * 0x100000000ULL + g_work.target[6];
 				applog(LOG_DEBUG, "job %s target change: %llx (%.1f)", g_work.job_id, target64, g_work.targetdiff);
 			}
+
 			memcpy(work.target, g_work.target, sizeof(work.target));
 			work.targetdiff = g_work.targetdiff;
 			work.height = g_work.height;
-			//nonceptr[0] = (UINT32_MAX / opt_n_threads) * thr_id; // 0 if single thr
+		}
+
+		work.extradata = g_work.extradata;
+
+		if (opt_algo == ALGO_SPREAD) {
+			struct spreadwork *swork = (struct spreadwork *) g_work.extradata;
+			if (!swork) {
+				applog(LOG_ERR, "SpreadCoin work data not allocated!");
+				continue;
+			}
+			nonceptr = (uint32_t*) &swork->data[84]; //data[21]
+			wcmplen = 80;
+			if (memcmp(swork->data, work.data, wcmplen)) {
+				memcpy(&work, &g_work, sizeof(struct work));
+				nonceptr[0] = (UINT32_MAX / opt_n_threads) * thr_id; // 0 if single thr
+				nonceptr[0] += (((rand()*4) & UINT32_MAX) / opt_n_threads) / 16;
+			} else {
+				nonceptr[0] += 0xC0;
+			}
+			nonceptr[0] &= 0xFFFFFFC0U; // make sure the 6 lowest bits are zero (%64)
 		}
 
 		if (opt_algo == ALGO_ZR5) {
@@ -1691,8 +1790,9 @@ static void *miner_thread(void *userdata)
 			#endif
 			memcpy(&work, &g_work, sizeof(struct work));
 			nonceptr[0] = (UINT32_MAX / opt_n_threads) * thr_id; // 0 if single thr
-		} else
+		} else {
 			nonceptr[0]++; //??
+		}
 
 		pthread_mutex_unlock(&g_work_lock);
 
@@ -1802,6 +1902,7 @@ static void *miner_thread(void *userdata)
 				break;
 			case ALGO_LYRA2:
 			case ALGO_NEOSCRYPT:
+			case ALGO_SPREAD:
 			case ALGO_X15:
 				minmax = 0x300000;
 				break;
@@ -1817,6 +1918,11 @@ static void *miner_thread(void *userdata)
 		max64 = min(UINT32_MAX, max64);
 
 		start_nonce = nonceptr[0];
+
+		if (opt_algo == ALGO_SPREAD) {
+			start_nonce &= 0xFFFFFFC0; // make sure the 6 lowest bits are zero
+			nonceptr[0] = start_nonce;
+		}
 
 		/* never let small ranges at end */
 		if (end_nonce >= UINT32_MAX - 256)
@@ -1925,6 +2031,9 @@ static void *miner_thread(void *userdata)
 			break;
 		case ALGO_SKEIN2:
 			rc = scanhash_skein2(thr_id, &work, max_nonce, &hashes_done);
+			break;
+		case ALGO_SPREAD:
+			rc = scanhash_spreadx11(thr_id, &work, max_nonce, &hashes_done);
 			break;
 		case ALGO_S3:
 			rc = scanhash_s3(thr_id, &work, max_nonce, &hashes_done);
@@ -2435,6 +2544,8 @@ void parse_arg(int key, char *arg)
 				i = opt_algo = ALGO_LYRA2;
 			else if (!strcasecmp("lyra2rev2", arg))
 				i = opt_algo = ALGO_LYRA2v2;
+			else if (!strcasecmp("spreadx11", arg))
+				i = opt_algo = ALGO_SPREAD;
 			else if (!strcasecmp("ziftr", arg))
 				i = opt_algo = ALGO_ZR5;
 			else

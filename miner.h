@@ -285,6 +285,7 @@ extern int scanhash_quark(int thr_id, struct work *work, uint32_t max_nonce, uns
 extern int scanhash_qubit(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_skeincoin(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_skein2(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
+extern int scanhash_spreadx11(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_s3(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_whirlx(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_x11(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
@@ -293,6 +294,8 @@ extern int scanhash_x14(int thr_id, struct work* work, uint32_t max_nonce, unsig
 extern int scanhash_x15(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_x17(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_zr5(int thr_id, struct work *work, uint32_t max_nonce, unsigned long *hashes_done);
+
+extern int scanhash_spreadx11(int thr_id, struct work* work, uint32_t max_nonce, unsigned long *hashes_done);
 
 extern int scanhash_sha256d(int thr_id, struct work *work, uint32_t max_nonce, unsigned long *hashes_done);
 extern int scanhash_scrypt(int thr_id, struct work *work, uint32_t max_nonce, unsigned long *hashes_done,
@@ -324,6 +327,7 @@ extern void free_quark(int thr_id);
 extern void free_qubit(int thr_id);
 extern void free_skeincoin(int thr_id);
 extern void free_skein2(int thr_id);
+extern void free_spreadx11(int thr_id);
 extern void free_s3(int thr_id);
 extern void free_whirlx(int thr_id);
 extern void free_x11(int thr_id);
@@ -606,6 +610,9 @@ struct work {
 	uint32_t scanned_from;
 	uint32_t scanned_to;
 
+	/* custom stuff */
+	void * extradata;
+
 	/* pok getwork txs */
 	uint32_t tx_count;
 	struct tx txs[POK_MAX_TXS];
@@ -756,6 +763,7 @@ void scrypthash(void* output, const void* input);
 void scryptjane_hash(void* output, const void* input);
 void skeincoinhash(void *output, const void *input);
 void skein2hash(void *output, const void *input);
+void spreadhash(void *output, const void *input);
 void s3hash(void *output, const void *input);
 void whirlxHash(void *state, const void *input);
 void x11hash(void *output, const void *input);

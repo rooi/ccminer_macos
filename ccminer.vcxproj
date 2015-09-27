@@ -336,6 +336,8 @@
     <ClInclude Include="lyra2\Sponge.h" />
     <ClInclude Include="quark\groestl_transf_quad.h" />
     <ClInclude Include="quark\groestl_functions_quad.h" />
+    <ClInclude Include="spreadx11\bignum_fp.h" />
+    <ClInclude Include="spreadx11\spreadx11.h" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="cuda.cpp" />
@@ -454,6 +456,10 @@
     <CudaCompile Include="cuda_skeincoin.cu">
       <MaxRegCount>48</MaxRegCount>
     </CudaCompile>
+    <CudaCompile Include="spreadx11\spreadx11.cu" />
+    <CudaCompile Include="spreadx11\cuda_blake.cu" />
+    <CudaCompile Include="spreadx11\cuda_spreadx11_sign.cu" />
+    <CudaCompile Include="spreadx11\cuda_sha256.cu" />
     <CudaCompile Include="x11\cuda_x11_aes.cu">
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </CudaCompile>
