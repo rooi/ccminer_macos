@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>Label</key>
+    <string>com.ccminer.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ccminer</string>
+        <string>-r</string>
+        <string>0</string>
+        <string>-a</string>
+        <string>x17</string>
+        <string>-o</string>
+        <string>stratum+tcp://yiimp.eu:3737</string>
+        <string>-u</string>
+        <string>DABswnAkgKeXKkmzk8wPdM1kyPgV6xf2MT</string>
+        <string>-p</string>
+        <string>c=XVG</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+            <key>PATH</key>
+            <string>/usr/local/bin/:$PATH</string>
+    </dict>
+    <key>SoftResourceLimits</key><dict>
+      <key>NumberOfProcesses</key><integer>1064</integer>
+    </dict>
+    <key>HardResourceLimits</key><dict>
+      <key>NumberOfProcesses</key><integer>1596</integer>
+    </dict>
+</dict>
+</plist>
