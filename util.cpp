@@ -1677,7 +1677,7 @@ static bool stratum_benchdata(json_t *result, json_t *params, int thr_id)
 #if defined(WIN32) && (defined(_M_X64) || defined(__x86_64__))
 	strcpy(os, "win64");
 #else
-	strcpy(os, is_windows() ? "win32" : "linux");
+	strcpy(os, is_windows() ? "win32" : "macos");
 #endif
 
 	cuda_gpu_info(cgpu);
