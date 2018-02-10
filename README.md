@@ -30,12 +30,17 @@ I used the follwoing for High Sierra 10.13.3:
 - Open a terminal and cd into the directory this script is downloaded
 - Find the your version of MacOS (about this mac -> system overview -> software: e.g. Systemversion macOS 10.13.2 (17C89))
 - Find the link for the nvidia web drivers that correspond to your mac's version and copy the link to the webdrivers on https://egpu.io/forums/mac-setup/wip-nvidia-egpu-support-for-high-sierra/paged/1/
-- In the previously opened terminal, run the following command (past the link copied from the previous step over the https://...pkg): sudo ./webdriver.sh -cu https://images.nvidia.com/mac/pkg/387/WebDriver-387.10.10.10.25.156.pkg
+- In the previously opened terminal, run the following command (past the link copied from the previous step over the https://...pkg):
+
+      sudo ./webdriver.sh -cu https://images.nvidia.com/mac/pkg/387/WebDriver-387.10.10.10.25.156.pkg
+
 - This should install the NVidia's webdrivers and will issue a restart, but the GPU is not detected yet. The following step are necessary to detect the GPU succesfully.
 - Reboot the mac while holding down both CMD+R key to start into recovery mode (or use WIN + R when using a windows keyboard)
 - When the “OS X Utilities” screen appears, pull down the ‘Utilities’ menu at the top of the screen instead, and choose “Terminal”
 - Type the following command to unable installing unsigned drivers into the terminal then hit return:
-    csrutil enable --without kext
+
+      csrutil enable --without kext
+
 - Find and download the zip package the correspond to your MacOS's version on https://egpu.io/forums/mac-setup/wip-nvidia-egpu-support-for-high-sierra/paged/1/ (e.g.: [nvidia-egpu-v6.zip](https://cdn.egpu.io/wp-content/uploads/wpforo/attachments/71/4376-NVDAEGPUSupport-v6.zip))
 - Install the downloaded package by opening it (you may have to go to system preferences -> security and privacy -> open, to start the installation)
 - Shutdown and connect you egpu and turn back on.
@@ -58,28 +63,28 @@ When running into trouble, please check the troubleshooting section below
 - Open a terminal
 - Run the following:
 
-    brew install pkg-config autoconf automake curl openssl llvm cmake
-    brew install cliutils/apple/libomp
+      brew install pkg-config autoconf automake curl openssl llvm cmake
+      brew install cliutils/apple/libomp
     
 - git clone this repository by running:
 
-    git clone https://github.com/rooi/ccminer_macos.git
+      git clone https://github.com/rooi/ccminer_macos.git
     
 - cd into the directory using:
 
-    cd ccminer_macos
+      cd ccminer_macos
     
 - build using the following:
 
-    ./build.sh
+      ./build.sh
     
 - install using the following:
 
-    sudo ./install
+      sudo ./install
     
 - copy the plist file for optional auto start by running:
 
-    cp com.ccminer.plist ~/Library/LaunchAgents/
+      cp com.ccminer.plist ~/Library/LaunchAgents/
     
 
 # Running ccminer
@@ -101,6 +106,7 @@ Error when running ./configure:
 ./configure: line 6165: `LIBCURL_CHECK_CONFIG(, 7.15.2, ,'
 
 Try to solve using a terminal with the following command:
-brew link curl --force
+
+    brew link curl --force
 
 
