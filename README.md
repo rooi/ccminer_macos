@@ -48,25 +48,39 @@ Download and install CUDA from: http://docs.nvidia.com/cuda/cuda-installation-gu
 
 #Step 3: install Homebrew
 Open a terminal and run:
+
     ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+    
 
 # Compile on MacOS
 ----------------
 When running into trouble, please check the troubleshooting section below
 - Open a terminal
 - Run the following:
+
     brew install pkg-config autoconf automake curl openssl llvm cmake
     brew install cliutils/apple/libomp
+    
 - git clone this repository by running:
+
     git clone https://github.com/rooi/ccminer_macos.git
+    
 - cd into the directory using:
+
     cd ccminer_macos
+    
 - build using the following:
+
     ./build.sh
+    
 - install using the following:
+
     sudo ./install
+    
 - copy the plist file for optional auto start by running:
+
     cp com.ccminer.plist ~/Library/LaunchAgents/
+    
 
 # Running ccminer
 ----------------
