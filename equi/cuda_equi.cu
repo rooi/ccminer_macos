@@ -27,6 +27,10 @@
 
 #include "blake2/blake2.h"
 
+// Not performing error checking is actually bad, but...
+#define checkCudaErrors(x) x
+#define checkCudaDriverErrors(x) x
+
 //#define WN 200
 //#define WK 9
 #ifndef MAX_GPUS
