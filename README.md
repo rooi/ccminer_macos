@@ -80,7 +80,7 @@ When running into trouble, please check the troubleshooting section below
     
 - install using the following:
 
-      sudo ./install
+      make install
     
 - copy the plist file for optional auto start by running:
 
@@ -101,7 +101,7 @@ Then load the daemon to enable starting up at load using: launchctl load ~/Libra
 
 Troubleshooting
 ----------------
-Error when running ./configure:
+Error when running ./build.sh:
 ./configure: line 6165: syntax error near unexpected token `,'
 ./configure: line 6165: `LIBCURL_CHECK_CONFIG(, 7.15.2, ,'
 
@@ -109,4 +109,30 @@ Try to solve using a terminal with the following command:
 
     brew link curl --force
 
+---
 
+Error when running ./build.sh:
+nvcc fatal   : The version ('90000') of the host compiler ('Apple clang') is not supported
+
+It seems that your version of xcode and cuda do not work together.
+You can try to solve this by downloading an older version of xcode (e.g. 7.3) by:
+Log in to https://developer.apple.com/downloads/
+Download Xcode CLT (Command Line Tools) 7.3
+Install CLT
+Run:
+
+      sudo xcode-select --switch /Library/Developer/CommandLineTools
+
+Verify that clang has been downgraded via:
+
+      clang --version
+      
+run build again using:
+      
+      ./build.sh
+      
+After a succesfull build, you can switch back xcode using:
+
+    sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+
+---
